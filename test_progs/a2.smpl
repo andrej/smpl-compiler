@@ -1,0 +1,5 @@
+main
+array[2][3][1] arr;
+{
+    return;
+}.

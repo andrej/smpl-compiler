@@ -131,7 +131,7 @@ class SmplLexer:
                 n_consumed = this_n_consumed
                 token = this_token
         if not n_consumed:
-            raise Exception("Lexer: no matching pattern at char {0:d}: {1:s}".format(pos, self.instring[pos]))
+            raise Exception("Lexer: no matching pattern at line {0:d}, col {1:d}: {2:s}".format(line, col, self.instring[pos]))
         whitespace = 0
         pos += n_consumed
         while pos < len(self.instring) and self.instring[pos].isspace():
@@ -176,15 +176,17 @@ class SmplParser:
         self.inlexer = inlexer
         self.current = 0
 
-    def _consume(self, tokens, msg="expected one of {0:s}, got {1:s}", error=True, warn=False):
+    def _consume(self, tokens, error=True, warn=False):
         consumed = self.inlexer.next()
-        if consumed.token in tokens:
+        if consumed and consumed.token in tokens:
             return consumed
-        msg = "expected one of {0:s}, got {1:s}"
         expected_tokens = ", ".join([t.pattern if isinstance(t, re.Pattern) else t for t in tokens])
-        consumed_token = consumed.token.pattern if isinstance(consumed.token, re.Pattern) else consumed.token
-        text = ("line {0:d}, column {1:d} (char {2:d}):".format(consumed.line, consumed.col, consumed.pos) +
-                msg.format(expected_tokens, consumed_token))
+        text = "Unexpected end of file, expected one of {}".format(expected_tokens)
+        if consumed:
+            msg = "expected one of {0:s}, got {1:s}"
+            consumed_token = consumed.token.pattern if isinstance(consumed.token, re.Pattern) else consumed.token
+            text = ("line {0:d}, column {1:d} (char {2:d}):".format(consumed.line, consumed.col, consumed.pos) +
+                    msg.format(expected_tokens, consumed_token))
         if error:
             raise SmplParseError(text)
         if warn:
@@ -198,10 +200,10 @@ class SmplParser:
     def computation(self):
         vdecls = []
         fdecls = []
-        self._consume({SmplToken.MAIN}, "smpl computation must start with keyword main")
+        self._consume({SmplToken.MAIN})
         while self._peek({SmplToken.VAR, SmplToken.ARRAY}):
             vdecl = self.var_decl()
-            vdecls.append(vdecl)
+            vdecls.extend(vdecl)
         while self._peek({SmplToken.VOID, SmplToken.FUNCTION}):
             fdecl = self.func_decl()
             fdecls.append(fdecl)
@@ -212,15 +214,13 @@ class SmplParser:
         return ast.Computation(vdecls, fdecls, stmts)
 
     def var_decl(self):
-        tdecl = self.type_decl()
-        ident = self.ident()
-        idents = [ident]
+        dims = self.type_decl()
+        idents = [self.ident()]
         while self._peek({SmplToken.COMMA}):
             self._consume({SmplToken.COMMA})
-            ident = self.ident()
-            idents.append(ident)
+            idents.append(self.ident())
         self._consume({SmplToken.SEMICOLON})
-        vdecls = [ast.VarDecl(tdecl, ident) for ident in idents]
+        vdecls = [ast.VariableDeclaration(ident, dims) for ident in idents]
         return vdecls
 
     def type_decl(self):
@@ -230,8 +230,9 @@ class SmplParser:
         scalar, an empty list is returned.
         """
         consumed = self._consume({SmplToken.VAR, SmplToken.ARRAY})
-        dims = []
+        dims = None  # dims == None indicates scalar value
         if consumed.token == SmplToken.ARRAY:
+            dims = []
             self._consume({SmplToken.LBRACKET})
             n = self.number()
             dims.append(n)
@@ -245,52 +246,55 @@ class SmplParser:
 
     def number(self):
         consumed = self._consume({SmplToken.NUMBER})
-        return int(consumed.val)
+        return ast.Number(int(consumed.val))
 
     def func_decl(self):
-        isvoid = False
+        is_void = False
         if self._peek({SmplToken.VOID}):
-            isvoid = True
+            is_void = True
             self._consume({SmplToken.VOID})
         self._consume({SmplToken.FUNCTION})
-        self.ident()
-        self.formal_param()
+        ident = self.ident()
+        param_idents = self.formal_param()
         self._consume({SmplToken.SEMICOLON})
-        self.func_body()
+        local_vdecls, stmts = self.func_body()
         self._consume({SmplToken.SEMICOLON})
-        return ast.FuncDecl()
+        return ast.FunctionDeclaration(ident, param_idents, local_vdecls, stmts, is_void)
         
     def ident(self):
         letters = self._consume({SmplToken.IDENT})
         identifier = letters.val
-        return identifier
+        return ast.Identifier(identifier)
 
     def formal_param(self):
         self._consume({SmplToken.LPAREN})
+        param_idents = []
         if self._peek({SmplToken.IDENT}):
-            self.ident()
+            param_idents.append(self.ident())
             while self._peek({SmplToken.COMMA}):
                 self._consume({SmplToken.COMMA})
-                self.ident()
+                param_idents.append(self.ident())
         self._consume({SmplToken.RPAREN})
+        return param_idents
 
     def func_body(self):
+        local_vdecls = []
         while self._peek({SmplToken.VAR, SmplToken.ARRAY}):
-            self.var_decl()
+            local_vdecls.extend(self.var_decl())
         self._consume({SmplToken.LBRACE})
-        if self._peek(self._statement_terminals):
-            self.stat_sequence()
+        stmts = []
+        if self._peek(self.statement_terminals):
+            stmts = self.stat_sequence()
         self._consume({SmplToken.RBRACE})
+        return local_vdecls, stmts
 
     def stat_sequence(self):
         stmt = self.statement()
         stmts = [stmt]
         while self._peek({SmplToken.SEMICOLON}):
             self._consume({SmplToken.SEMICOLON})
-            stmt = self.statement()
-            stmts.append(stmt)
-        if self._peek({SmplToken.SEMICOLON}):
-            self._consume({SmplToken.SEMICOLON})
+            if self._peek(self.statement_terminals):
+                stmts.append(self.statement())
         return stmts
     
     def statement(self):
@@ -312,91 +316,112 @@ class SmplParser:
 
     def assignment(self):
         self._consume({SmplToken.LET})
-        self.designator()
+        lhs = self.designator()
         self._consume({SmplToken.LARROW})
-        self.expression()
-        return ast.AssignmentNode()
+        rhs = self.expression()
+        return ast.Assignment(lhs, rhs)
 
     def designator(self):
-        self.ident()
+        ident = self.ident()
+        indices = []
         while self._peek({SmplToken.LBRACKET}):
             self._consume({SmplToken.LBRACKET})
-            self.expression()
+            indices.append(self.expression())
             self._consume({SmplToken.RBRACKET})
+        if not indices:  # scalar access
+            return ident
+        return ast.ArrayAccess(ident, indices)
 
     def expression(self):
-        self.term()
+        opa = self.term()
         while self._peek({SmplToken.PLUS, SmplToken.MINUS}):
-            self._consume({SmplToken.PLUS, SmplToken.MINUS})
-            self.term()
+            op_tkn = self._consume({SmplToken.PLUS, SmplToken.MINUS})
+            op = "+" if op_tkn.token == SmplToken.PLUS else "-"
+            opb = self.term()
+            opa = ast.BinOp(op, opa, opb)
+        return opa
 
     def term(self):
-        self.factor()
+        opa = self.factor()
         while self._peek({SmplToken.ASTERISK, SmplToken.SLASH}):
-            self._consume({SmplToken.ASTERISK, SmplToken.SLASH})
-            self.factor()
+            op_tkn = self._consume({SmplToken.ASTERISK, SmplToken.SLASH})
+            op = "*" if op_tkn.token == SmplToken.ASTERISK else "/"
+            opb = self.factor()
+            opa = ast.BinOp(op, opa, opb)
+        return opa
 
     def factor(self):
+        ret = None
         if self._peek({SmplToken.IDENT}):
-            self.designator()
+            ret = self.designator()
         elif self._peek({SmplToken.NUMBER}):
-            self.number()
+            ret = self.number()
         elif self._peek({SmplToken.LPAREN}):
             self._consume({SmplToken.LPAREN})
-            self.expression()
+            ret = self.expression()
             self._consume({SmplToken.RPAREN})
         elif self._peek({SmplToken.CALL}):
-            self.func_call()
+            ret = self.func_call()
         else:
             self._consume(self.factor_terminals)
             # only for error message
+        return ret
     
     def relation(self):
-        self.expression()
-        self.rel_op()
-        self.expression()
+        opa = self.expression()
+        rel_op_tkn = self.rel_op()
+        opb = self.expression()
+        op = ("==" if rel_op_tkn.token == SmplToken.OP_EQ else
+              "!=" if rel_op_tkn.token == SmplToken.OP_INEQ else
+              "<"  if rel_op_tkn.token == SmplToken.OP_LT else
+              "<=" if rel_op_tkn.token == SmplToken.OP_LE else
+              ">"  if rel_op_tkn.token == SmplToken.OP_GT else
+              ">=" if rel_op_tkn.token == SmplToken.OP_GE else None)
+        return ast.BinOp(op, opa, opb)
 
     def rel_op(self):
-        self._consume({SmplToken.OP_EQ, SmplToken.OP_INEQ, SmplToken.OP_LT,
-                       SmplToken.OP_LE, SmplToken.OP_GT, SmplToken.OP_GE})
+        return self._consume({SmplToken.OP_EQ, SmplToken.OP_INEQ, SmplToken.OP_LT,
+                              SmplToken.OP_LE, SmplToken.OP_GT, SmplToken.OP_GE})
 
     def func_call(self):
         self._consume({SmplToken.CALL})
-        self.ident()
+        func_ident = self.ident()
+        params = []
         if self._peek({SmplToken.LPAREN}):
             self._consume({SmplToken.LPAREN})
             if self._peek(self.factor_terminals):
-                self.expression()
+                params.append(self.expression())
                 while self._peek({SmplToken.COMMA}):
                     self._consume({SmplToken.COMMA})
-                    self.expression()
+                    params.append(self.expression())
             self._consume({SmplToken.RPAREN})
-        return ast.CallNode()
+        return ast.FuncCall(func_ident, params)
 
     def if_statement(self):
         self._consume({SmplToken.IF})
-        self.relation()
+        condition = self.relation()
         self._consume({SmplToken.THEN})
         stmts = self.stat_sequence()
+        else_stmts = []
         if self._peek({SmplToken.ELSE}):
             self._consume({SmplToken.ELSE})
             else_stmts = self.stat_sequence()
-            stmts.extend(else_stmts)
         self._consume({SmplToken.FI})
-        return ast.IfNode(stmts)
+        return ast.IfStatement(condition, stmts, else_stmts)
 
     def while_statement(self):
         self._consume({SmplToken.WHILE})
-        self.relation()
+        condition = self.relation()
         self._consume({SmplToken.DO})
         stmts = self.stat_sequence()
         self._consume({SmplToken.OD})
-        return ast.WhileNode(stmts)
+        return ast.WhileStatement(condition, stmts)
 
     def return_statement(self):
         self._consume({SmplToken.RETURN})
+        val = None
         if self._peek(self.factor_terminals):
-            self.expression()
-        return ast.ReturnNode()
+            val = self.expression()
+        return ast.ReturnStatement(val)
 
     
