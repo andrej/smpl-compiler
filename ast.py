@@ -206,6 +206,9 @@ class FunctionDeclaration(ASTNode):
     def compile(self, context):
         old_root = context.current_block
         root = context.get_new_block()
+        func = ssa.Function()
+        func.enter_block = root
+        root.func = func
         context.add_root_block(root)
         context.set_current_block(root)
 
@@ -221,6 +224,9 @@ class FunctionDeclaration(ASTNode):
         # Compile body
         for stmt in self.body_stmts:
             stmt.compile(context)
+
+        # Invariant that must hold here: compiling statements results in one join block in the end
+        func.exit_block = context.current_block
 
         context.set_current_block(old_root)
 
@@ -251,6 +257,10 @@ class Computation(ASTNode):
 
     def compile(self, context):
         root_block = context.get_new_block()
+        main_func = ssa.Function()
+        main_func.is_main = True
+        main_func.enter_block = root_block
+        root_block.func = main_func
         context.add_root_block(root_block)
         context.set_current_block(root_block)
         for vdecl in self.vdecls:
@@ -259,7 +269,8 @@ class Computation(ASTNode):
             fdecl.compile(context)
         for stmt in self.stmts:
             stmt.compile(context)
-        context.emit("end")
+        main_func.exit_block = main_func
+        context.emit("end", produces_output=False)
         return None
 
     def dot_label(self):
@@ -328,7 +339,7 @@ class BinOp(ASTNode):
         """
         cond_op = self.compile(context)
         branch_map = {">=": "blt", ">": "ble", "<=": "bgt", "<": "bge", "!=": "beq", "==": "bne"}
-        context.emit(branch_map[self.op], cond_op, jump_label)
+        context.emit(branch_map[self.op], cond_op, ssa.LabelOp(jump_label), produces_output=False)
         return None
 
     def dot_label(self):
@@ -380,7 +391,7 @@ class Assignment(ASTNode):
                 raise Exception("Assignment to undeclared array '{}'".format(name))
 
             addr_op = self.lhs.compile_addr(context)
-            context.emit("store", val_op, addr_op)
+            context.emit("store", val_op, addr_op, produces_output=False)
 
         return None
 
@@ -440,7 +451,7 @@ class FuncCall(ASTNode):
         for arg_expr in self.arg_exprs:
             arg_op = arg_expr.compile(context)
             arg_ops.append(arg_op)
-        res_op = context.emit("call", *arg_ops)
+        res_op = context.emit("call", ssa.FunctionOp(self.ident.name), *arg_ops)
         return res_op
 
     def dot_label(self):
@@ -496,7 +507,7 @@ class IfStatement(ASTNode):
         context.set_current_block(then_block)
         for stmt in self.stmts_if:
             stmt.compile(context)
-        context.emit("bra", join_block.label)  # skip over the else block
+        context.emit("bra", ssa.LabelOp(join_block.label), produces_output=False)  # skip over the else block
         # note that after compiling all these statements, current_block is not necessarily then_block
         context.current_block.add_succ(join_block)
         then_block = context.current_block
@@ -587,7 +598,7 @@ class WhileStatement(ASTNode):
             stmt.compile(context)
         # note that after compiling these statements, context.current_block is not necessarily equal to body_block
         context.instr_counter = new_instr_counter  # reset to before the reset
-        context.emit("bra", join_block.label)
+        context.emit("bra", ssa.LabelOp(join_block.label), produces_output=False)
 
         join_block.add_succ(body_block)  # fall-through
         context.current_block.add_succ(join_block)  # loop
@@ -610,8 +621,9 @@ class ReturnStatement(ASTNode):
         return self.value.run(context)
 
     def compile(self, context):
+        # FIXME hoist into join block for if statements!
         res_op = self.value.compile(context)
-        context.emit("return", res_op)
+        context.emit("return", res_op, produces_output=False)
         return res_op
 
     def dot_label(self):

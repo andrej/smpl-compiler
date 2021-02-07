@@ -10,6 +10,7 @@ class Op:
 
 
 class ImmediateOp(Op):
+
     def __init__(self, val):
         self.val = val
 
@@ -18,6 +19,7 @@ class ImmediateOp(Op):
 
 
 class InstructionOp(Op):
+
     def __init__(self, instr):
         self.i = instr.i
 
@@ -26,6 +28,7 @@ class InstructionOp(Op):
 
 
 class ArgumentOp(Op):
+
     def __init__(self, ident):
         self.name = ident.name
 
@@ -34,22 +37,45 @@ class ArgumentOp(Op):
 
 
 class LabelOp(Op):
-    def __init__(self, block):
-        self.label = block.label
+
+    def __init__(self, label):
+        self.label = label
 
     def __str__(self):
         return self.label
 
 
-class Instruction:
+class FunctionOp(Op):
 
-    def __init__(self, instr, *ops: Op):
-        self.instr: str = instr
-        self.ops: typing.Iterable[Op] = ops
-        self.i: int = -1
+    def __init__(self, func):
+        self.func = func
 
     def __str__(self):
-        return "{} = {} {}".format(self.i, self.instr, ", ".join(str(op) for op in self.ops))
+        return self.func + "()"
+
+
+class Instruction:
+
+    def __init__(self, instr, *ops: Op, produces_output=True):
+        self.instr: str = instr
+        self.ops: typing.List[Op] = ops
+        self.i: int = -1
+        self.produces_output = produces_output
+
+    def __str__(self):
+        args = ", ".join(str(op) for op in self.ops)
+        if not self.produces_output:
+            return "{} {}".format(self.instr, args)
+        return "{} = {} {}".format(self.i, self.instr, args)
+
+
+class Function:
+
+    def __init__(self):
+        self.enter_block: BasicBlock = None
+        self.exit_block: BasicBlock = None
+        self.arg_names: typing.List = []
+        self.is_main: bool = False
 
 
 class BasicBlock(dot.DotNode):
@@ -58,18 +84,21 @@ class BasicBlock(dot.DotNode):
         super().__init__()
         self.instrs = []
         self.label = ""
-        self.succs: typing.List[BasicBlock] = [] # the main fall-through block should be the first in the list
+        self.succs: typing.List[BasicBlock] = []  # the main fall-through block should be the first in the list
+        self.preds: typing.List[BasicBlock] = []
         self.locals_op: typing.Dict[str, Op] = {}
         self.locals_dim: typing.Dict[str, typing.List[int]] = {}
+        self.func: Function = None
 
-    def emit(self, instr_index, *args):
-        instr = Instruction(*args)
+    def emit(self, instr_index, *args, produces_output=True):
+        instr = Instruction(*args, produces_output=produces_output)
         instr.i = instr_index
         self.instrs.append(instr)
         return InstructionOp(instr)
 
     def add_succ(self, block):
         self.succs.append(block)
+        block.preds.append(self)
 
     def declare_local(self, name: str, dims: typing.Optional[typing.List[int]]):
         if name in self.locals_op:
@@ -106,8 +135,8 @@ class CompilationContext(dot.DotGraph):
         self.root_blocks = []
         self.current_block: BasicBlock = None
 
-    def emit(self, *args):
-        result_op = self.current_block.emit(self.instr_counter, *args)
+    def emit(self, *args, produces_output=True):
+        result_op = self.current_block.emit(self.instr_counter, *args, produces_output=produces_output)
         self.instr_counter += 1
         return result_op
 
@@ -127,6 +156,7 @@ class CompilationContext(dot.DotGraph):
         block = self.get_new_block()
         block.locals_op = self.current_block.locals_op.copy()
         block.locals_dim = self.current_block.locals_dim.copy()
+        block.func = self.current_block.func
         return block
 
     def set_current_block(self, block: BasicBlock):
@@ -138,3 +168,29 @@ class CompilationContext(dot.DotGraph):
     def dot_roots(self):
         return self.root_blocks
 
+    def __iter__(self):
+        return CompilationContextIterator(self)
+
+
+class CompilationContextIterator:
+    """
+    Depth-first iteration gives the correct order of blocks for
+    fall-through execution.
+    """
+
+    def __init__(self, context: CompilationContext):
+        self.context = context
+        self.todo = self.context.root_blocks.copy()
+        self.visited = set()
+
+    def __next__(self):
+        if not self.todo:
+            raise StopIteration
+        block = self.todo.pop(0)
+        self.visited.add(block)
+        for succ in block.succs:
+            if succ in self.visited:
+                continue
+            self.visited.add(succ)
+            self.todo.append(succ)
+        return block

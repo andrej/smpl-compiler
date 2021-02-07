@@ -18,11 +18,11 @@ class DotGraph:
             i, these_defs, these_links = root.dot_repr(i)
             defs.extend(these_defs)
             links.extend(these_links)
-        graph = """digraph G_{0:d} {{
+        graph = """digraph G {{
+            {0:s}
             {1:s}
-            {2:s}
         }}
-        """.format(i, "\n".join(defs), "\n".join(links))
+        """.format("\n".join(defs), "\n".join(links))
         return graph
 
 
