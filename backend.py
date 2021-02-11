@@ -1,4 +1,16 @@
-import typing
+"""
+Abstract base class for backend implementations.
+
+The backend translates a stream of SSA IR instructions (inside a ssa.CompilationContext)
+to machine-specific instructions. It can call back to a register allocator.
+
+The provided implementations here perform compilation of the instructions
+in depth-first order, which ensures correct order of instruction stream for
+fall-through instructions.
+
+Author: André Rösti
+"""
+
 import ssa
 
 

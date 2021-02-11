@@ -1,9 +1,15 @@
 """
-DLX code generation from our SSA IR
+DLX code generation from our SSA IR. Contains classes for each individual
+instruction type that DLX has, as well as a DLX backend that iterates
+over the IR instructions and produces corresponding DLX instructions as
+it goes. Uses a provided register allocator object to translate the operands
+of the IR to actual machine registers and memory locations; in turn also
+provides the register allocator with methods for it to call back to generate
+memory spills/loads.
+
+Author: André Rösti
 """
-import operator
 import backend
-import allocator
 import ssa
 
 
@@ -135,6 +141,12 @@ class INSTRUCTIONS:
 
 
 class DLXBackend(backend.Backend):
+    """
+    Compile a DLX instruction stream from the input SSA instructions.
+    Uses the provided register allocator to resolve IR operands to actual
+    registers and memory locations. Provides methods for the register
+    allocator to emit spill and load code.
+    """
 
     RES_REG = 5
     ZERO_REG = 0
@@ -213,6 +225,7 @@ class DLXBackend(backend.Backend):
         # Simple F1 instructions
         arith_f1_instrs = {
             "add": INSTRUCTIONS.ADD,
+            "adda": INSTRUCTIONS.ADD,
             "sub": INSTRUCTIONS.SUB,
             "mul": INSTRUCTIONS.MUL,
             "div": INSTRUCTIONS.DIV,
@@ -232,30 +245,18 @@ class DLXBackend(backend.Backend):
         # Simple F1 instructions
         if instr.instr in arith_f1_instrs:
             res_reg = None
-            # Don't emit an instruction at all for immediate + immediate
-            if isinstance(instr.ops[0], ssa.ImmediateOp) and isinstance(instr.ops[1], ssa.ImmediateOp):
-                # TODO move immediate elimination to SSA, not in backend
-                pyfun = {"add": operator.add,
-                         "sub": operator.sub,
-                         "mul": operator.mul,
-                         "div": operator.div,
-                         "cmp": lambda a, b: 0 if a == b else -1 if a < b else +1}
-                res = pyfun[instr.instr](ops[0], ops[1])
-                self.emit(INSTRUCTIONS.ADDI.make(self.RES_REG, self.ZERO_REG, res))
-            else:
-                dlx_instr = arith_f1_instrs[instr.instr]
-                if (isinstance(instr.ops[1], ssa.ImmediateOp)
-                        or isinstance(instr.ops[0], ssa.ImmediateOp) and instr.instr in {"add", "sub"}):
-                    dlx_instr = dlx_instr.make_immediate()
-                    if isinstance(instr.ops[0], ssa.ImmediateOp) and instr.instr == "add":
-                        ops[0], ops[1] = ops[1], ops[0]
-                    elif isinstance(instr.ops[0], ssa.ImmediateOp) and instr.instr == "sub":
-                        ops[0], ops[1] = ops[1], -ops[0]
-                self.emit(dlx_instr.make(self.RES_REG, *ops))
+            dlx_instr = arith_f1_instrs[instr.instr]
+            if (isinstance(instr.ops[1], ssa.ImmediateOp)
+                    or isinstance(instr.ops[0], ssa.ImmediateOp) and instr.instr in {"add", "sub"}):
+                dlx_instr = dlx_instr.make_immediate()
+                if isinstance(instr.ops[0], ssa.ImmediateOp) and instr.instr == "add":
+                    ops[0], ops[1] = ops[1], ops[0]
+                elif isinstance(instr.ops[0], ssa.ImmediateOp) and instr.instr == "sub":
+                    ops[0], ops[1] = ops[1], -ops[0]
+            self.emit(dlx_instr.make(self.RES_REG, *ops))
             self.allocator.store(instr.i, self.RES_REG)
 
         elif instr.instr in jump_f1_instrs:
-            # TODO do same immediate elimination as for arith
             dlx_instr = jump_f1_instrs[instr.instr].make(ops[0], 0, 0)
             assert isinstance(instr.ops[1], ssa.LabelOp)
             dlx_instr.jump_label = instr.ops[1].label
@@ -277,9 +278,6 @@ class DLXBackend(backend.Backend):
         elif instr.instr == "alloca":
             raise NotImplementedError()
 
-        elif instr.instr == "adda":
-            raise NotImplementedError()
-
         elif instr.instr == "call":
             assert isinstance(instr.ops[0], ssa.FunctionOp)
             if instr.ops[0].func == "inputNum":
@@ -295,7 +293,7 @@ class DLXBackend(backend.Backend):
             raise NotImplementedError()
 
         elif instr.instr == "phi":
-            if instr.ops[0] != instr.ops[1] or True:
+            if instr.ops[0] != instr.ops[1]:
                 assert len(context.preds) == 2
                 for i, (op, pred) in enumerate(zip(instr.ops, context.preds)):
                     op_compiled = self.compile_operand(op, context=context, into=7, block=pred.label, back=True)

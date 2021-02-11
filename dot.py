@@ -1,7 +1,16 @@
 """
-Helpers for dot graph file generation
+Helpers for dot graph file generation (.gv). For a class to implement graph output,
+it must simply subclass DotGraph, DotSubgraph and DotNode, and overwrite the
+abstract dot_subgraphs(), dot_roots() and dot_edge_sets() methods.
+
+Author: André Rösti
 """
-import typing
+
+
+def label_escape(instr):
+    if not isinstance(instr, str):
+        return instr
+    return instr.replace("<", "\\<").replace(">", "\\>")
 
 
 class DotGraph:
@@ -10,11 +19,10 @@ class DotGraph:
         return []
 
     def dot_repr(self):
-        out = ""
         i = 0
         subgraphs = []
         for j, subgraph in enumerate(self.dot_subgraphs()):
-            i, subgraph_code = subgraph.dot_repr(j, i)
+            i, subgraph_code = subgraph.dot_subgraph_repr(j, i)
             subgraphs.append(subgraph_code)
         graph = """digraph G {{
             {0:s}
@@ -30,7 +38,7 @@ class DotSubgraph(DotGraph):
     def dot_label(self):
         return ""
 
-    def dot_repr(self, j=0, i=0):
+    def dot_subgraph_repr(self, j=0, i=0):
         defs = []
         links = []
         for root in self.dot_roots():
@@ -73,7 +81,7 @@ class DotNode:
         defs = []
         links = []
         for node, identifier in to_draw.items():
-            defs.append('{0:s} [shape=record, label="{1:s}"];'
+            defs.append('{0:s} [shape=record, label="{1}"];'
                         .format(identifier, node.dot_label()))
             edge_sets = node.dot_edge_sets()
             for edge_set in edge_sets:

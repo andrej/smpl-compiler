@@ -1,0 +1,9 @@
+main
+array[4] arrA, arrB;
+var question, i, x, y;
+{
+    let i <- 0;
+    let x <- arrA[0];
+    let y <- arrA[i];
+    return y;
+}.

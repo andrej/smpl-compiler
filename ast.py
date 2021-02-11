@@ -3,7 +3,6 @@ Abstract syntax tree nodes for the Smpl language. Provides methods that convert
 AST nodes to SSA (single static assignment) instruction streams for compilation
 and also methods for evaluation (interpreter).
 
-
 Author: André Rösti
 """
 import sys
@@ -14,23 +13,27 @@ import config
 import dot
 
 
-class InterpreterContext:
+class AST(dot.DotSubgraph):
 
-    def __init__(self):
-        self.functions = {}
-        self.locals = {}
+    def __init__(self, root):
+        self.root = root
+
+    def compile(self, *args):
+        return self.root.compile(*args)
+
+    def run(self):
+        return self.root.run()
+
+    def dot_subgraphs(self):
+        return [self]
+
+    def dot_roots(self):
+        return [self.root]
 
 
-builtin_funcs = {
-    "inputNum": lambda: int(input()),
-    "outputNum": print,
-    "outputNewLine": lambda: print("\n")
-}
+class ASTNode(dot.DotNode):
 
-
-class ASTNode(dot.DotGraph, dot.DotNode):
-
-    def run(self, context: InterpreterContext):
+    def run(self, context):
         """
         Implements an interpreter for this AST. The context that is passed in must be updated
         according to the semantics of the language in subclasses. For expressions, the return
@@ -51,9 +54,6 @@ class ASTNode(dot.DotGraph, dot.DotNode):
         :return: For expressions, return an ssa.Op representing the result of the expression
         """
         raise NotImplementedError()
-
-    def dot_roots(self):
-        return [self]
 
 
 class Identifier(ASTNode):
@@ -116,7 +116,10 @@ class ArrayAccess(ASTNode):
 
     def compile(self, context):
         addr_op = self.compile_addr(context)
-        load_op = context.emit("load", addr_op)
+        load_op = context.emit("load", addr_op, may_eliminate=True)
+        # We must check here whether we can eliminate BOTH the load and
+        # the adda instruction; cannot just eliminate one of both, since
+        # they are supposed to appear in pairs.
         return load_op
 
     def compile_addr(self, context):
@@ -126,10 +129,10 @@ class ArrayAccess(ASTNode):
         for i, idx in enumerate(self.indices):
             idx_op = idx.compile(context)
             stride = functools.reduce(operator.mul, dims[i+1:], 1)
-            this_offset_op = context.emit("mul", idx_op, ssa.ImmediateOp(stride))
-            offset_op = context.emit("add", offset_op, this_offset_op)
-        offset_op = context.emit("mul", offset_op, ssa.ImmediateOp(config.INTEGER_SIZE))
-        addr_op = context.emit("adda", base_addr_op, offset_op)
+            this_offset_op = context.emit("mul", idx_op, ssa.ImmediateOp(stride), may_eliminate=True)
+            offset_op = context.emit("add", offset_op, this_offset_op, may_eliminate=True)
+        offset_op = context.emit("mul", offset_op, ssa.ImmediateOp(config.INTEGER_SIZE), may_eliminate=True)
+        addr_op = context.emit("adda", base_addr_op, offset_op, may_eliminate=False)
         return addr_op
 
     def dot_label(self):
@@ -342,7 +345,7 @@ class BinOp(ASTNode):
         return None
 
     def dot_label(self):
-        return self.op
+        return dot.label_escape(self.op)
 
     def dot_edge_sets(self):
         return [dot.DotEdgeSet([self.opa], label="Operand A"),
@@ -651,5 +654,20 @@ class ReturnStatement(ASTNode):
         return "return"
 
     def dot_edge_sets(self):
-        return [dot.DotEdgeSet([self.value], label="return value", color="black")]
+        return [dot.DotEdgeSet([self.value] if self.value else [], label="return value", color="black")]
+
+
+class InterpreterContext:
+
+    def __init__(self):
+        self.functions = {}
+        self.locals = {}
+
+
+builtin_funcs = {
+    "inputNum": lambda: int(input()),
+    "outputNum": print,
+    "outputNewLine": lambda: print("\n")
+}
+
 

@@ -1,4 +1,15 @@
-import typing
+"""
+An abstract interface definition for register allocators, along with some implementations.
+
+A register allocator must be provided to a Backend upon code generation. The backend will
+call back to the register allocator with requests to map ssa.Ops to actual machine
+registers and memory locations (for spills). To be backend-independent, the register
+allocator must then call back to the appropriate methods in the backend to generate
+load and store instructions.
+
+Author: André Rösti
+"""
+
 import ssa
 import backend
 

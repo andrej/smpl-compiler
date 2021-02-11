@@ -176,6 +176,12 @@ class SmplParser:
         self.inlexer = inlexer
         self.current = 0
 
+    def parse(self):
+        if self.current != 0:
+            raise Exception("Parser is single-use.")
+        tree = ast.AST(self.computation())
+        return tree
+
     def _consume(self, tokens, error=True, warn=False):
         consumed = self.inlexer.next()
         if consumed and consumed.token in tokens:
