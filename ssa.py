@@ -43,6 +43,9 @@ class UninitializedVarOp(Op):
     backend should translate this to a constant value of zero and emit a
     warning.
     """
+    def __init__(self, name):
+        self.name = name
+
     def __str__(self):
         return "??"
 
@@ -89,8 +92,8 @@ class LabelOp(Op):
     """
     Labels for jump/branch instructions
     """
-    def __init__(self, label):
-        self.label = label
+    def __init__(self, block):
+        self.label = block.label
 
     def __str__(self):
         return self.label
@@ -108,6 +111,21 @@ class FunctionOp(Op):
 
     def __str__(self):
         return self.func + "()"
+
+
+class PossiblyPhiOp(Op):
+    """
+    Used during compilation of while loops; all variables are mapped to
+    "possibly phi" operands. We then check whether any of the possibly
+    phi variables have been touched in the loop body, and adjust the
+    value to the phi value in the body accordingly, replacing all of these
+    PossiblyPhiOps. Hence, the PossiblyPhiOps should never be seen by the backend.
+    """
+    def __init__(self, original_op):
+        self.op = original_op
+
+    def __eq__(self, other):
+        return isinstance(other, PossiblyPhiOp) and self.op == other.op
 
 
 class Instruction:
@@ -287,8 +305,7 @@ class BasicBlock(dot.DotNode):
         val_op = self.locals_op[name]
         dims = self.locals_dim[name]
         if not val_op:
-            sys.stderr.write("Warning: access to uninitialized variable '{}'\n".format(name))
-            return UninitializedVarOp, dims
+            return UninitializedVarOp(name), dims
         return val_op, dims
 
     def set_local_op(self, name, val: Op):
@@ -310,6 +327,7 @@ class BasicBlock(dot.DotNode):
             visited = set()
         if self in visited:
             return
+        visited.add(self)
         for instr in self.instrs:
             new_instr_ops = list(instr.ops)
             for i, op in enumerate(instr.ops):
@@ -317,7 +335,6 @@ class BasicBlock(dot.DotNode):
                     new_instr_ops[i] = new_op
             instr.ops = tuple(new_instr_ops)
         for succ in self.succs:
-            visited.add(succ)
             succ.rename_op(old_op, new_op, visited)
 
     def dot_edge_sets(self):
@@ -420,6 +437,7 @@ class CompilationContext(dot.DotGraph):
                             "sub": ImmediateOp(0),
                             "mul": ImmediateOp(1),
                             "div": ImmediateOp(1)}
+
         n_eliminated = 1
         while n_eliminated > 0:  # need to keep iterating until we reach a fixed point
             n_eliminated = 0
@@ -452,10 +470,22 @@ class CompilationContext(dot.DotGraph):
                     for instr in block.instrs
                     for op in instr.ops
                     if isinstance(op, InstructionOp)}
+        side_effect_free = {"let", "neg", "add", "sub", "mul", "div", "cmp",
+                            "adda", "load", "phi"}
         for block in self:
             for i, instr in enumerate(block.instrs):
-                if instr.produces_output and instr.i not in used_set:
+                if instr.instr in side_effect_free and instr.i not in used_set:
                     del block.instrs[i]
+
+    def print_warnings(self):
+        uninitialized_set = {op.name
+                             for block in self
+                             for instr in block.instrs
+                             if instr.instr != "phi"
+                             for op in instr.ops
+                             if isinstance(op, UninitializedVarOp)}
+        for uninitialized in uninitialized_set:
+            sys.stderr.write("Warning: Access to uninitialized variable '{}'.\n".format(uninitialized))
 
     def dot_subgraphs(self):
         funcs = {bb.func for bb in self.root_blocks}
@@ -475,9 +505,9 @@ class CompilationContextIterator:
     def __next__(self):
         if not self.todo:
             raise StopIteration
-        block = self.todo.pop(0)
+        block = self.todo.pop()
         self.visited.add(block)
-        for succ in block.succs:
+        for succ in reversed(block.succs):
             if succ in self.visited:
                 continue
             self.visited.add(succ)

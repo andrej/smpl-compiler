@@ -4,10 +4,6 @@ Abstract base class for backend implementations.
 The backend translates a stream of SSA IR instructions (inside a ssa.CompilationContext)
 to machine-specific instructions. It can call back to a register allocator.
 
-The provided implementations here perform compilation of the instructions
-in depth-first order, which ensures correct order of instruction stream for
-fall-through instructions.
-
 Author: André Rösti
 """
 
@@ -33,12 +29,14 @@ class Backend:
                 inverse_block_offsets[offset] = [label]
 
         out = ""
+        label_length = max(len(label) for label in self.block_offsets)
         for offset, instr in enumerate(self.instrs):
             if offset in inverse_block_offsets:
-                out += "\n\n"
                 for label in inverse_block_offsets[offset]:
-                    out += "{}:\n".format(label)
-            out += "    {}\n".format(str(instr))
+                    out += "{0:{1}s} ".format(label+":", label_length+1)
+                out += str(instr)+"\n"
+            else:
+                out += "{}  {}\n".format(" "*label_length, str(instr))
         return out
 
     def get_machine_code(self):
@@ -88,6 +86,8 @@ class Backend:
 
     def emit_back(self, instr, block=None):
         block = block or self.current_block
+        if not block in self.block_instrs:
+            self.block_instrs[block] = ([], [], [])
         self.block_instrs[block][1].append(instr)
 
     def emit_term(self, instr, block=None):

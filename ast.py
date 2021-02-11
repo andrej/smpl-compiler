@@ -330,18 +330,18 @@ class BinOp(ASTNode):
         res_op = context.emit(instr_map[self.op], op_a, op_b, may_eliminate=True)
         return res_op
 
-    def compile_conditional_jump(self, context, jump_label):
+    def compile_conditional_jump(self, context, jump_block):
         """
         Compiles a conditional jump that is performed on the *opposite* of the condition,
         i.e. if the condition holds true, execution falls through, but if it is false,
         a jump is performed. This is more usful for while/if code generation.
         :param context:
-        :param jump_label:
+        :param jump_block:
         :return:
         """
         cond_op = self.compile(context)
         branch_map = {">=": "blt", ">": "ble", "<=": "bgt", "<": "bge", "!=": "beq", "==": "bne"}
-        context.emit(branch_map[self.op], cond_op, ssa.LabelOp(jump_label), produces_output=False)
+        context.emit(branch_map[self.op], cond_op, ssa.LabelOp(jump_block), produces_output=False)
         return None
 
     def dot_label(self):
@@ -453,7 +453,8 @@ class FuncCall(ASTNode):
         for arg_expr in self.arg_exprs:
             arg_op = arg_expr.compile(context)
             arg_ops.append(arg_op)
-        res_op = context.emit("call", ssa.FunctionOp(self.ident.name), *arg_ops)
+        res_op = context.emit("call", ssa.FunctionOp(self.ident.name), *arg_ops,
+                              may_eliminate=False)
         return res_op
 
     def dot_label(self):
@@ -505,14 +506,14 @@ class IfStatement(ASTNode):
         context.current_block.dominates.extend([then_block, else_block, join_block])
 
         # Compile condition evaluation.
-        self.condition.compile_conditional_jump(context, else_block.label)
+        self.condition.compile_conditional_jump(context, else_block)
         # fall through if condition holds true
 
         # Compile both branches.
         context.set_current_block(then_block)
         for stmt in self.stmts_if:
             stmt.compile(context)
-        context.emit("bra", ssa.LabelOp(join_block.label), produces_output=False)  # skip over the else block
+        context.emit("bra", ssa.LabelOp(join_block), produces_output=False)  # skip over the else block
         # note that after compiling all these statements, current_block is not necessarily then_block
         context.current_block.add_succ(join_block)
         then_block = context.current_block
@@ -533,7 +534,9 @@ class IfStatement(ASTNode):
             val_b, _ = else_block.get_local(name)
             if val_a == val_b:
                 continue
-            phi_op = context.emit("phi", val_a, val_b)
+            phi_op = context.emit("phi",
+                                  ssa.LabelOp(then_block), val_a,
+                                  ssa.LabelOp(else_block), val_b)
             context.current_block.set_local_op(name, phi_op)
 
         # current context has been updated to join block, so any future instructions will
@@ -567,6 +570,7 @@ class WhileStatement(ASTNode):
 
     def compile(self, context):
 
+        original_block = context.current_block
         head_block = context.get_new_block_with_same_context()
         # Fall-through into the loop header, which contains the condition evaluation.
         # We also jump to this block again at the end of the loop to re-evaluate.
@@ -577,29 +581,40 @@ class WhileStatement(ASTNode):
 
         # Loop body
         body_block = context.get_new_block_with_same_context()
+        for name, op in body_block.locals_op.items():
+            # We mark all operands as "possibly phi"; this helps us observe
+            # which operands are touched by the body instructions later.
+            # Note that for nested loops, this means operands will be nested
+            # in multiple layers of PossiblyPhiOps.
+            body_block.locals_op[name] = ssa.PossiblyPhiOp(op)
         context.set_current_block(body_block)
         for stmt in self.body_stmts:
             stmt.compile(context)
         # note that after compiling these statements, context.current_block is not necessarily
         # equal to body_block any more! However, since all of our control has one singular
         # join block, we know that all control in the loop body ends in context.current_block.
-        context.emit("bra", ssa.LabelOp(head_block.label), produces_output=False)
+        context.emit("bra", ssa.LabelOp(head_block), produces_output=False)
         body_end_block = context.current_block
 
         # Emit necessary phi nodes; look at all the variables assigned to in the loop body.
         context.set_current_block(head_block)  # go back to head block to emit phis
         for name in body_end_block.locals_op:
             head_op, _ = head_block.get_local(name)
+            wrapped_head_op = ssa.PossiblyPhiOp(head_op)
             body_op, _ = body_end_block.get_local(name)
-            if body_op != head_op:  # The mapping name -> op changed in the child block!
-                renamed_op = context.emit("phi", head_op, body_op)
-                body_block.rename_op(head_op, renamed_op)
+            if body_op != wrapped_head_op:  # The mapping name -> op changed in the child block!
+                renamed_op = context.emit("phi",
+                                          ssa.LabelOp(original_block), head_op,
+                                          ssa.LabelOp(body_end_block), body_op)
+                body_block.rename_op(wrapped_head_op, renamed_op)
                 head_block.set_local_op(name, renamed_op)
                 body_block.set_local_op(name, renamed_op)
+            else:  # Operand not touched; undo wrapping
+                body_block.rename_op(wrapped_head_op, head_op)
 
         # Compile condition (after phi nodes)
         exit_block = context.get_new_block_with_same_context()
-        self.condition.compile_conditional_jump(context, exit_block.label)
+        self.condition.compile_conditional_jump(context, exit_block)
 
         head_block.add_succ(body_block)  # fall-through
         head_block.add_succ(exit_block)  # branch-out

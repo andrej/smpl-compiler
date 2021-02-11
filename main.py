@@ -56,12 +56,14 @@ def main():
         return 0
     if args.interpret:
         tree.run()
+        return
 
     # Compile AST to intermediate SSA representation
     ir = ssa.CompilationContext(do_cse=not args.no_cse)
     tree.compile(ir)
     if not args.no_dce:
         ir.eliminate_dead_code()
+    ir.print_warnings()
     if not args.no_ce:
         ir.eliminate_constants()
     if args.ir:  # Only print SSA representation, do not compile

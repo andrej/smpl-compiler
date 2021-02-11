@@ -156,6 +156,7 @@ class DLXBackend(backend.Backend):
     FRAME_PTR_REG = 28
 
     WORD_SIZE = 4
+    STACK_SIZE = 0xFFF
 
     ARG_REGS = [1, 2, 3, 4]
     CALLEE_SAVE = [5, 6, 7, 8, 9, 10]
@@ -186,7 +187,9 @@ class DLXBackend(backend.Backend):
         emit_fun = self.emit if not back else self.emit_back
         if isinstance(op, ssa.ImmediateOp):
             if op.val < 1 << 16:
-                return op.val
+                emit_fun(INSTRUCTIONS.ADDI.make(into, self.ZERO_REG, op.val),
+                         block=block)
+                return into
             else:
                 raise Exception("Immediate values may be at most < 2**16")
         elif isinstance(op, ssa.InstructionOp):
@@ -216,12 +219,6 @@ class DLXBackend(backend.Backend):
             instr.instr = "sub"
             instr.ops = [ssa.ImmediateOp(0)] + instr.ops
 
-        # For any instruction, we first have to compile the operands
-        if instr.instr != "phi":
-            ops = []  # will contain register numbers / immediate values for all operands
-            for i, op in enumerate(instr.ops):
-                ops.append(self.compile_operand(op, context=context, into=i+1))
-
         # Simple F1 instructions
         arith_f1_instrs = {
             "add": INSTRUCTIONS.ADD,
@@ -231,6 +228,13 @@ class DLXBackend(backend.Backend):
             "div": INSTRUCTIONS.DIV,
             "cmp": INSTRUCTIONS.CMP
         }
+
+        # For most instructions, we first have to compile the operands.
+        # We do not do it here for arithmetic F1 instructions, since we might want to use
+        # immediate variants of these instructions instead if one of the operands are immediate.
+        if instr.instr != "phi" and instr.instr not in arith_f1_instrs:
+            ops = [self.compile_operand(op, context=context, into=i+1) for i, op in enumerate(instr.ops)]
+            # ops will contain register numbers / immediate values for all operands
 
         # Conditional jump F1 instructions
         jump_f1_instrs = {
@@ -244,15 +248,20 @@ class DLXBackend(backend.Backend):
 
         # Simple F1 instructions
         if instr.instr in arith_f1_instrs:
-            res_reg = None
             dlx_instr = arith_f1_instrs[instr.instr]
             if (isinstance(instr.ops[1], ssa.ImmediateOp)
                     or isinstance(instr.ops[0], ssa.ImmediateOp) and instr.instr in {"add", "sub"}):
                 dlx_instr = dlx_instr.make_immediate()
-                if isinstance(instr.ops[0], ssa.ImmediateOp) and instr.instr == "add":
-                    ops[0], ops[1] = ops[1], ops[0]
-                elif isinstance(instr.ops[0], ssa.ImmediateOp) and instr.instr == "sub":
-                    ops[0], ops[1] = ops[1], -ops[0]
+                ssa_op_a, ssa_op_b = instr.ops
+                if isinstance(ssa_op_a, ssa.ImmediateOp) and instr.instr in {"add", "mul"}:
+                    ssa_op_a, ssa_op_b = ssa_op_b, ssa_op_a
+                elif isinstance(ssa_op_a, ssa.ImmediateOp) and instr.instr == "sub":
+                    ssa_op_a, ssa_op_b = ssa_op_a, -ssa_op_b
+                ops = [self.compile_operand(ssa_op_a, context=context, into=1),
+                       ssa_op_b.val]
+            else:
+                # Neither is immediate, just regularly compile
+                ops = [self.compile_operand(op, context=context, into=i+1) for i, op in enumerate(instr.ops)]
             self.emit(dlx_instr.make(self.RES_REG, *ops))
             self.allocator.store(instr.i, self.RES_REG)
 
@@ -293,11 +302,15 @@ class DLXBackend(backend.Backend):
             raise NotImplementedError()
 
         elif instr.instr == "phi":
-            if instr.ops[0] != instr.ops[1]:
-                assert len(context.preds) == 2
-                for i, (op, pred) in enumerate(zip(instr.ops, context.preds)):
-                    op_compiled = self.compile_operand(op, context=context, into=7, block=pred.label, back=True)
-                    self.allocator.store(instr.i, op_compiled, block=pred.label, back=True)
+            pred_a, op_a, pred_b, op_b = instr.ops
+            if op_a != op_b:
+                for (pred, op) in [(pred_a, op_a), (pred_b, op_b)]:
+                    op_compiled = self.compile_operand(op, context=context,
+                                                       into=7,
+                                                       block=pred.label, back=True)
+                    # TODO check whether op compiled != access of op
+                    self.allocator.store(instr.i, op_compiled,
+                                         block=pred.label, back=True)
 
         elif instr.instr == "end":
             self.emit_term(INSTRUCTIONS.RET.make(0, 0, 0))

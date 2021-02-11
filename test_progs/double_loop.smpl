@@ -1,16 +1,19 @@
 main
 var i, j, k, out;
 {
+    let i <- 0;
     let k <- 2;
     let out <- 1;
     while i < 20 do
         let out <- out * 2;
         let j <- 0;
         while j < 10 do
+            let out <- out + j;
             let j <- j + 1;
         od;
         let i <- i + 1;
         let k <- 3;
     od;
-    return out + k;
+    let out <- out + k;
+    call outputNum(out);
 }.
