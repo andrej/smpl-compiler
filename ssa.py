@@ -1,7 +1,18 @@
 """
-Class for representing single static assignment (SSA) instructions.
+Provides classes for representing SSA instructions (and their operands) and
+emitting them to a stream of basic blocks in a compilation context.
+
+In this file:
+- Op and subclasses: Represents a value (input and output to/from instruction)
+- Instruction: Instruction type, operands, pointer to dominating instructions in block
+- BasicBlock: Stream of instructions, pointers to successor and predecessor blocks
+- Function: Set of linked BasicBlocks
+- CompilationContext: As compilation from AST to IR goes forward, keeps track of the
+  "current" block to emit instructions to, provides methods to add new blocks,
+  provides iterator that gives blocks in correct order of execution for backend compilation
+
+Author: André Rösti
 """
-import functools
 import operator
 import typing
 import dot
@@ -13,7 +24,9 @@ class Op:
 
 
 class ImmediateOp(Op):
-
+    """
+    Represents an immediate value known at compile time.
+    """
     def __init__(self, val):
         self.val = val
 
@@ -24,17 +37,28 @@ class ImmediateOp(Op):
         return isinstance(other, ImmediateOp) and self.val == other.val
 
 
-class UninitializedVarOpObj(Op):
-
+class UninitializedVarOp(Op):
+    """
+    Represents an uninitialized variable access. To follow smpl semantics, the
+    backend should translate this to a constant value of zero and emit a
+    warning.
+    """
     def __str__(self):
         return "??"
 
-
-UninitializedVarOp = UninitializedVarOpObj()
+    def __eq__(self, other):
+        return isinstance(other, UninitializedVarOp)
 
 
 class InstructionOp(Op):
-
+    """
+    Operand that represents the value of a previous computation. The previous
+    computation is referred to by its instruction count (i). Note that with
+    dead code elimination, these instruction counts are not necessarily
+    consecutive, and they are not guaranteed to map to the correct index in
+    a basic blocks "instrs" list! Instead, consider them as named values with
+    no further meaning of the name.
+    """
     def __init__(self, instr):
         self.i = instr.i
 
@@ -46,7 +70,11 @@ class InstructionOp(Op):
 
 
 class ArgumentOp(Op):
-
+    """
+    Operand representing a function argument. Translate this type of operand
+    into the appropriate register/memory access depending on the ABI of the
+    backend.
+    """
     def __init__(self, ident):
         self.name = ident.name
 
@@ -58,7 +86,9 @@ class ArgumentOp(Op):
 
 
 class LabelOp(Op):
-
+    """
+    Labels for jump/branch instructions
+    """
     def __init__(self, label):
         self.label = label
 
@@ -70,7 +100,9 @@ class LabelOp(Op):
 
 
 class FunctionOp(Op):
-
+    """
+    Represents the name of a function to be called in a "call" statement
+    """
     def __init__(self, func):
         self.func = func
 
@@ -79,10 +111,12 @@ class FunctionOp(Op):
 
 
 class Instruction:
-
+    """
+    A single-static assignment intermediate representation instruction
+    """
     def __init__(self, instr, *ops: Op, produces_output=True):
         self.instr: str = instr
-        self.ops: typing.List[Op] = ops
+        self.ops: typing.Tuple[Op] = ops
         self.i: int = -1
         self.produces_output = produces_output
         self.dom_by_instr: typing.Optional[Instruction] = None  # linked list of previous dominating instructions
@@ -147,10 +181,14 @@ class Instruction:
 
 
 class Function(dot.DotSubgraph):
+    """
+    Connected basic blocks are grouped into functions. This object provides the
+    necessary additional information for function compilation.
+    """
 
     def __init__(self):
-        self.enter_block: BasicBlock = None
-        self.exit_block: BasicBlock = None
+        self.enter_block: typing.Optional[BasicBlock] = None
+        self.exit_block: typing.Optional[BasicBlock] = None
         self.arg_names: typing.List = []
         self.is_main: bool = False
         self.name = ""
@@ -163,6 +201,26 @@ class Function(dot.DotSubgraph):
 
 
 class BasicBlock(dot.DotNode):
+    """
+    A basic block is a stream of instructions that is never interrupted.
+
+    We keep track of the successors and predecessors of basic blocks in
+    self.succs and self.preds. Note that self.succs[0] has a special meaning:
+    it is the fall-through block; if this basic block does not do a
+    conditional jump, execution must continue at the basic block self.succs[0].
+
+    Each basic block has its mapping of variable names in the AST to a SSA
+    operand representing the value of that variable at the current *end* of
+    the basic block.
+
+    Instructions can be added to the end of this block using the emit() method.
+
+    self.dom_instr_tree is a data structure used for common subexpression
+    elimination: For each dominance class (roughly instruction type), it points
+    to the last instance of that instruction of that type in this basic block;
+    using the instructions "dom_by_instr" field, you can then follow back the
+    instructions that dominate this instruction.
+    """
 
     def __init__(self):
         super().__init__()
@@ -172,7 +230,7 @@ class BasicBlock(dot.DotNode):
         self.preds: typing.List[BasicBlock] = []
         self.locals_op: typing.Dict[str, Op] = {}
         self.locals_dim: typing.Dict[str, typing.List[int]] = {}
-        self.func: Function = None
+        self.func: typing.Optional[Function] = None
         self.dominates: typing.List[BasicBlock] = []  # list of basic blocks this block dominates
         self.dom_instr_tree: typing.Dict[str, Instruction] = {}  # search structure for common subexpression elimination
 
@@ -211,12 +269,19 @@ class BasicBlock(dot.DotNode):
         block.preds.append(self)
 
     def declare_local(self, name: str, dims: typing.Optional[typing.List[int]]):
+        """
+        Declare a local variable for this block and set it to an uninitialized value.
+        """
         if name in self.locals_op:
             raise Exception("Attempting to redeclare local '{}'".format(name))
         self.locals_op[name] = None
         self.locals_dim[name] = dims
 
     def get_local(self, name):
+        """
+        Return the SSA operand that represents the current value for this
+        variable at the current end of the instruction stream of this block.
+        """
         if name not in self.locals_op:
             raise Exception("Access to undeclared local '{}'".format(name))
         val_op = self.locals_op[name]
@@ -227,6 +292,11 @@ class BasicBlock(dot.DotNode):
         return val_op, dims
 
     def set_local_op(self, name, val: Op):
+        """
+        Update which SSA operand represents the given variable name. When
+        emitting an instruction that assigns to a variable, you must call
+        this method to update the mapping.
+        """
         if name not in self.locals_op:
             raise Exception("Access to undeclared local '{}'".format(name))
         self.locals_op[name] = val
@@ -234,7 +304,7 @@ class BasicBlock(dot.DotNode):
     def rename_op(self, old_op, new_op, visited=None):
         """
         Recursively rename an operator appearing in all instructions in this block
-        and all of its successors.
+        and all of its successors. Should also call set_local_op().
         """
         if not visited:
             visited = set()
@@ -272,10 +342,10 @@ class CompilationContext(dot.DotGraph):
     The compilation context is the root element of the intermediate representation of the program.
     It contains references to all the basic blocks. During compilation, a pointer to the
     "current_block" is updated; all emitted instructions are appended to this current block. As
-    compilation progresses, further basic blocks can split of the current block using the
+    compilation progresses, further basic blocks can split off of the current block using the
     get_new_block_with_same_context() function; this freezes the current block's context
-    (mainly variable mappings). For completely independent blocks (new functions), use the
-    get_new_block() function.
+    (mainly variable mappings). This can be used for if/while statements that branch off.
+    For completely independent blocks (new functions), use the get_new_block() function.
     """
 
     def __init__(self, do_cse=True):
