@@ -611,26 +611,6 @@ class WhileStatement(ASTNode):
         context.set_current_block(exit_block)
         return None
 
-        # We make a temporary context and compile all the body statements.
-        # This will all be discarded; we only use it to see which variables
-        # are assigned to, so we can add the correct phi nodes. We then re-
-        # compile the body using the phi node values of the touched variables
-        # after the join block.
-        old_instr_counter = context.instr_counter
-        tmp_body_block = context.get_new_block_with_same_context()
-        context.set_current_block(tmp_body_block)
-        for stmt in self.body_stmts:
-            stmt.compile(context)
-        tmp_body_block = context.current_block
-
-        context.set_current_block(head_block)
-        for name in context.current_block.locals_op:
-            val_a, _ = context.current_block.get_local(name)
-            val_b, _ = tmp_body_block.get_local(name)
-            if val_a != val_b:
-                phi_op = context.emit("phi", val_a, val_b)
-                context.current_block.set_local_op(name, phi_op)
-
     def dot_label(self):
         return "while"
 
