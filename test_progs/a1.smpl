@@ -1,5 +1,6 @@
 main
-var a, b, c, d, e; {
+var a, b, c, d, e;
+{
 	let a <- call inputNum();
 	let b <- a;
 	let c <- b;

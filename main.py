@@ -19,6 +19,9 @@ def main():
     argparser.add_argument("--asm", default=False, action="store_true", help="Output assembly instead of machine code.")
     argparser.add_argument("--run", default=False, action="store_true", help="Run byte code in DLX emulator.")
     args = argparser.parse_args()
+    output = args.output
+    if output == sys.stdout:
+        output = output.buffer
     with open(args.infile) as f:
         instring = f.read()
         inlexer = parser.SmplLexer(instring)
@@ -27,7 +30,7 @@ def main():
         ir = ssa.CompilationContext()
         tree.compile(ir)
         if args.ir:  # Only print SSA representation, do not compile
-            args.output.write(ir.dot_repr().encode('ascii'))
+            output.write(ir.dot_repr().encode('ascii'))
             return 0
         if args.dlx:
             backend = dlx.DLXBackend(ir)
@@ -41,9 +44,6 @@ def main():
                 dlx_emulator.DLX.load([instr.encode() for instr in backend.instrs])
                 dlx_emulator.DLX.execute()
             else:
-                output = args.output
-                if output == sys.stdout:
-                    output = output.buffer
                 output.write(backend.get_machine_code())
 
 

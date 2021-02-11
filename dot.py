@@ -6,24 +6,45 @@ import typing
 
 class DotGraph:
 
-    def dot_roots(self):
+    def dot_subgraphs(self):
         return []
 
     def dot_repr(self):
         out = ""
         i = 0
+        subgraphs = []
+        for j, subgraph in enumerate(self.dot_subgraphs()):
+            i, subgraph_code = subgraph.dot_repr(j, i)
+            subgraphs.append(subgraph_code)
+        graph = """digraph G {{
+            {0:s}
+        }}""".format("\n".join(subgraphs))
+        return graph
+
+
+class DotSubgraph(DotGraph):
+
+    def dot_roots(self):
+        return []
+
+    def dot_label(self):
+        return ""
+
+    def dot_repr(self, j=0, i=0):
         defs = []
         links = []
         for root in self.dot_roots():
             i, these_defs, these_links = root.dot_repr(i)
             defs.extend(these_defs)
             links.extend(these_links)
-        graph = """digraph G {{
-            {0:s}
+        subgraph_label = self.dot_label()
+        subgraph_code = """subgraph cluster_{0:d} {{
             {1:s}
-        }}
-        """.format("\n".join(defs), "\n".join(links))
-        return graph
+            {2:s}
+            {3:s}
+        }}""".format(j, "\n".join(defs), "\n".join(links),
+                     "label=\"{}\"".format(subgraph_label) if subgraph_label else "")
+        return i, subgraph_code
 
 
 class DotNode:
@@ -58,14 +79,16 @@ class DotNode:
             for edge_set in edge_sets:
                 for child in edge_set.children:
                     child_identifier = to_draw[child]
-                    links.append('{0:s} -> {1:s} [label="{2:s}", color={3:s}];'
-                                 .format(identifier, child_identifier, edge_set.label, edge_set.color))
+                    links.append('{0:s} -> {1:s} [{2:s}];'
+                                 .format(identifier, child_identifier, edge_set.get_prop_str()))
         return i, defs, links
 
 
 class DotEdgeSet:
 
-    def __init__(self, children, label, color):
+    def __init__(self, children, **props):
         self.children = children
-        self.label = label
-        self.color = color
+        self.props = props
+
+    def get_prop_str(self):
+        return ", ".join('{}="{}"'.format(k, v) for k, v in self.props.items())

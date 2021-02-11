@@ -1,0 +1,15 @@
+main
+var i, j, k, out;
+{
+    let k <- 2;
+    let out <- 1;
+    while i < 20 do
+        let out <- out * 2;
+        while j < 10 do
+            let j <- j + 1;
+        od;
+        let i <- i + 1;
+        let k <- 3;
+    od;
+    return out + k;
+}.

@@ -73,9 +73,6 @@ class Identifier(ASTNode):
 
     def compile(self, context):
         val_op, _ = context.current_block.get_local(self.name)
-        if not val_op:
-            sys.stderr.write("Warning: access to uninitialized variable '{}'\n".format(self.name))
-            val_op = ssa.ImmediateOp(0)
         return val_op
 
     def dot_label(self):
@@ -192,9 +189,9 @@ class FunctionDeclaration(ASTNode):
         self.body_stmts = body_stmts
 
     def dot_edge_sets(self):
-        return [dot.DotEdgeSet(self.param_idents, "Param", "blue"),
-                dot.DotEdgeSet(self.body_vdecls, "Local Variable", "purple"),
-                dot.DotEdgeSet(self.body_stmts, "Body", "black")]
+        return [dot.DotEdgeSet(self.param_idents, label="Param"),
+                dot.DotEdgeSet(self.body_vdecls, label="Local Variable", color="purple"),
+                dot.DotEdgeSet(self.body_stmts, label="Body")]
 
     def run(self, context):
         name = self.ident.name
@@ -207,6 +204,7 @@ class FunctionDeclaration(ASTNode):
         old_root = context.current_block
         root = context.get_new_block()
         func = ssa.Function()
+        func.name = self.ident.name
         func.enter_block = root
         root.func = func
         context.add_root_block(root)
@@ -258,6 +256,7 @@ class Computation(ASTNode):
     def compile(self, context):
         root_block = context.get_new_block()
         main_func = ssa.Function()
+        main_func.name = "main"
         main_func.is_main = True
         main_func.enter_block = root_block
         root_block.func = main_func
@@ -277,9 +276,9 @@ class Computation(ASTNode):
         return "Computation"
 
     def dot_edge_sets(self):
-        return [dot.DotEdgeSet(self.stmts, "Statement", "black"),
-                dot.DotEdgeSet(self.vdecls, "Variable Declaration", "blue"),
-                dot.DotEdgeSet(self.fdecls, "Function Declaration", "blue")]
+        return [dot.DotEdgeSet(self.stmts, label="Statement"),
+                dot.DotEdgeSet(self.vdecls, label="Variable Declaration", color="blue"),
+                dot.DotEdgeSet(self.fdecls, label="Function Declaration", color="blue")]
 
 
 class BinOp(ASTNode):
@@ -325,7 +324,7 @@ class BinOp(ASTNode):
                      "<": "cmp", "<=": "cmp", ">": "cmp", ">=": "cmp", "==": "cmp", "!=": "cmp"}
         op_a = self.opa.compile(context)
         op_b = self.opb.compile(context)
-        res_op = context.emit(instr_map[self.op], op_a, op_b)
+        res_op = context.emit(instr_map[self.op], op_a, op_b, may_eliminate=True)
         return res_op
 
     def compile_conditional_jump(self, context, jump_label):
@@ -346,8 +345,8 @@ class BinOp(ASTNode):
         return self.op
 
     def dot_edge_sets(self):
-        return [dot.DotEdgeSet([self.opa], "Operand A", "black"),
-                dot.DotEdgeSet([self.opb], "Operand B", "black")]
+        return [dot.DotEdgeSet([self.opa], label="Operand A"),
+                dot.DotEdgeSet([self.opb], label="Operand B")]
 
 
 class Assignment(ASTNode):
@@ -358,8 +357,8 @@ class Assignment(ASTNode):
         self.rhs = rhs
 
     def dot_edge_sets(self):
-        return [dot.DotEdgeSet([self.lhs], "LHS", "black"),
-                dot.DotEdgeSet([self.rhs], "RHS", "black")]
+        return [dot.DotEdgeSet([self.lhs], label="LHS"),
+                dot.DotEdgeSet([self.rhs], label="RHS")]
 
     def run(self, context):
         name = None
@@ -458,7 +457,7 @@ class FuncCall(ASTNode):
         return "Call '{}'".format(self.ident.name)
 
     def dot_edge_sets(self):
-        return [dot.DotEdgeSet(self.arg_exprs, "Argument", "black")]
+        return [dot.DotEdgeSet(self.arg_exprs, label="Argument")]
 
 
 class IfStatement(ASTNode):
@@ -470,9 +469,9 @@ class IfStatement(ASTNode):
         self.stmts_else = stmts_else
 
     def dot_edge_sets(self):
-        return [dot.DotEdgeSet([self.condition], "Condition", "black"),
-                dot.DotEdgeSet(self.stmts_if, "True", "green"),
-                dot.DotEdgeSet(self.stmts_else, "False", "red")]
+        return [dot.DotEdgeSet([self.condition], label="Condition"),
+                dot.DotEdgeSet(self.stmts_if, label="True", color="green"),
+                dot.DotEdgeSet(self.stmts_else, label="False", color="red")]
 
     def dot_connected_nodes(self, typ=0):
         if typ == 0:
@@ -498,6 +497,9 @@ class IfStatement(ASTNode):
         join_block = context.get_new_block_with_same_context()
         context.current_block.add_succ(then_block)
         context.current_block.add_succ(else_block)
+
+        # We know dominator information for if structures
+        context.current_block.dominates.extend([then_block, else_block, join_block])
 
         # Compile condition evaluation.
         self.condition.compile_conditional_jump(context, else_block.label)
@@ -547,8 +549,8 @@ class WhileStatement(ASTNode):
         self.body_stmts = body_stmts
 
     def dot_edge_sets(self):
-        return [dot.DotEdgeSet([self.condition], "Condition", "black"),
-                dot.DotEdgeSet(self.body_stmts, "Loop", "blue")]
+        return [dot.DotEdgeSet([self.condition], label="Condition"),
+                dot.DotEdgeSet(self.body_stmts, label="Loop", color="blue")]
 
     def run(self, context):
         val = None
@@ -562,8 +564,49 @@ class WhileStatement(ASTNode):
 
     def compile(self, context):
 
-        join_block = context.get_new_block_with_same_context()
-        context.current_block.add_succ(join_block)
+        head_block = context.get_new_block_with_same_context()
+        # Fall-through into the loop header, which contains the condition evaluation.
+        # We also jump to this block again at the end of the loop to re-evaluate.
+        # After compiling the loop body (and seeing which variables it uses), we
+        # will also add the necessary phi nodes here and rename the variables in the loop body.
+        context.current_block.dominates.append(head_block)
+        context.current_block.add_succ(head_block)
+
+        # Loop body
+        body_block = context.get_new_block_with_same_context()
+        context.set_current_block(body_block)
+        for stmt in self.body_stmts:
+            stmt.compile(context)
+        # note that after compiling these statements, context.current_block is not necessarily
+        # equal to body_block any more! However, since all of our control has one singular
+        # join block, we know that all control in the loop body ends in context.current_block.
+        context.emit("bra", ssa.LabelOp(head_block.label), produces_output=False)
+        body_end_block = context.current_block
+
+        # Emit necessary phi nodes; look at all the variables assigned to in the loop body.
+        context.set_current_block(head_block)  # go back to head block to emit phis
+        for name in body_end_block.locals_op:
+            head_op, _ = head_block.get_local(name)
+            body_op, _ = body_end_block.get_local(name)
+            if body_op != head_op:  # The mapping name -> op changed in the child block!
+                renamed_op = context.emit("phi", head_op, body_op)
+                body_block.rename_op(head_op, renamed_op)
+                head_block.set_local_op(name, renamed_op)
+                body_block.set_local_op(name, renamed_op)
+
+        # Compile condition (after phi nodes)
+        exit_block = context.get_new_block_with_same_context()
+        self.condition.compile_conditional_jump(context, exit_block.label)
+
+        head_block.add_succ(body_block)  # fall-through
+        head_block.add_succ(exit_block)  # branch-out
+        body_end_block.add_succ(head_block)  # loop
+
+        # Set dominator information known ahead of time for this control structure
+        head_block.dominates.extend([body_block, exit_block])
+
+        context.set_current_block(exit_block)
+        return None
 
         # We make a temporary context and compile all the body statements.
         # This will all be discarded; we only use it to see which variables
@@ -577,35 +620,13 @@ class WhileStatement(ASTNode):
             stmt.compile(context)
         tmp_body_block = context.current_block
 
-        context.set_current_block(join_block)
+        context.set_current_block(head_block)
         for name in context.current_block.locals_op:
             val_a, _ = context.current_block.get_local(name)
             val_b, _ = tmp_body_block.get_local(name)
             if val_a != val_b:
                 phi_op = context.emit("phi", val_a, val_b)
                 context.current_block.set_local_op(name, phi_op)
-
-        # Compile condition (after phi node)
-        exit_block = context.get_new_block_with_same_context()
-        self.condition.compile_conditional_jump(context, exit_block.label)
-        # fall through into loop body
-        new_instr_counter = context.instr_counter
-
-        body_block = context.get_new_block_with_same_context()
-        context.instr_counter = old_instr_counter  # reset the instruction counter because we are redoing the body instructions
-        context.set_current_block(body_block)
-        for stmt in self.body_stmts:
-            stmt.compile(context)
-        # note that after compiling these statements, context.current_block is not necessarily equal to body_block
-        context.instr_counter = new_instr_counter  # reset to before the reset
-        context.emit("bra", ssa.LabelOp(join_block.label), produces_output=False)
-
-        join_block.add_succ(body_block)  # fall-through
-        context.current_block.add_succ(join_block)  # loop
-        join_block.add_succ(exit_block)  # branch-out
-
-        context.set_current_block(exit_block)
-        return None
 
     def dot_label(self):
         return "while"
@@ -630,5 +651,5 @@ class ReturnStatement(ASTNode):
         return "return"
 
     def dot_edge_sets(self):
-        return [dot.DotEdgeSet([self.value], "return value", "black")]
+        return [dot.DotEdgeSet([self.value], label="return value", color="black")]
 
