@@ -174,7 +174,7 @@ class VariableDeclaration(ASTNode):
         context.current_block.declare_local(name, dims)
         if dims:  # issue allocation instruction
             size = functools.reduce(operator.mul, dims, 1) * config.INTEGER_SIZE
-            base_addr = context.emit("alloca", size)
+            base_addr = context.emit("alloca", ssa.ImmediateOp(size))
             context.current_block.set_local_op(name, base_addr)
         return None
 
@@ -377,8 +377,10 @@ class Assignment(ASTNode):
         else:
             arr = context.locals[name]
             for idx in self.lhs.indices[:-1]:
+                idx, context = idx.run(context)
                 arr = arr[idx]
-            arr[self.lhs.indices[-1].val] = val
+            last_index, context = self.lhs.indices[-1].run(context)
+            arr[last_index] = val
         return None, context
 
     def compile(self, context):

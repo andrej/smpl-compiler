@@ -46,8 +46,13 @@ class Backend:
         self.block_instrs = {}
         for block in self.ir:
             self.block_instrs[block.label] = ([], [], [])
+        self.current_block = self.ir.root_blocks[0].label  # Main block
+        self.compile_init()
         for block in self.ir:
             self.compile_block(block)
+
+    def compile_init(self):
+        pass
 
     def compile_prelude(self, func_block):
         pass
@@ -101,4 +106,7 @@ class Backend:
         raise NotImplementedError()
 
     def emit_stack_store(self, offs, val_reg, block=None, back=False):
+        raise NotImplementedError()
+
+    def emit_immediate(self, immediate, into, block=None):
         raise NotImplementedError()

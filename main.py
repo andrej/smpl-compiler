@@ -78,7 +78,7 @@ def main():
         backend.compile()
         backend.link()
         if args.asm:
-            args.output.write(backend.get_asm())
+            output.write(backend.get_asm().encode("ascii"))
         elif args.run:
             dlx_emulator.DLX.load([instr.encode() for instr in backend.instrs])
             dlx_emulator.DLX.execute()

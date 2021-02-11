@@ -102,19 +102,19 @@ class INSTRUCTIONS:
     ASH = F2Instruction(13, "ASH")
     CHK = F2Instruction(14, "CHK")
 
-    ADDI = F2Instruction(16, "ADDI")
-    SUBI = F2Instruction(17, "SUBI")
-    MULI = F2Instruction(18, "MULI")
-    DIVI = F2Instruction(19, "DIVI")
-    MODI = F2Instruction(20, "MODI")
-    CMPI = F2Instruction(21, "CMPI")
-    ORI  = F2Instruction(24, "ORI")
-    ANDI = F2Instruction(25, "ANDI")
-    BICI = F2Instruction(26, "BICI")
-    XORI = F2Instruction(27, "XORI")
-    LSHI = F2Instruction(28, "LSHI")
-    ASHI = F2Instruction(29, "ASHI")
-    CHKI = F2Instruction(30, "CHKI")
+    ADDI = F1Instruction(16, "ADDI")
+    SUBI = F1Instruction(17, "SUBI")
+    MULI = F1Instruction(18, "MULI")
+    DIVI = F1Instruction(19, "DIVI")
+    MODI = F1Instruction(20, "MODI")
+    CMPI = F1Instruction(21, "CMPI")
+    ORI  = F1Instruction(24, "ORI")
+    ANDI = F1Instruction(25, "ANDI")
+    BICI = F1Instruction(26, "BICI")
+    XORI = F1Instruction(27, "XORI")
+    LSHI = F1Instruction(28, "LSHI")
+    ASHI = F1Instruction(29, "ASHI")
+    CHKI = F1Instruction(30, "CHKI")
 
     LDW = F1Instruction(32, "LDW")
     LDX = F2Instruction(32, "LDX")
@@ -161,6 +161,10 @@ class DLXBackend(backend.Backend):
     ARG_REGS = [1, 2, 3, 4]
     CALLEE_SAVE = [5, 6, 7, 8, 9, 10]
 
+    def __init__(self, ir):
+        super().__init__(ir)
+        self.heap_height = 0
+
     def compile_prelude(self, func_block):
         if func_block.func.is_main:
             return  # no prelude required for main func
@@ -173,6 +177,10 @@ class DLXBackend(backend.Backend):
         for reg in self.CALLEE_SAVE:
             self.emit(INSTRUCTIONS.PSH.make(reg, self.STACK_PTR_REG, self.WORD_SIZE))
         self.emit(INSTRUCTIONS.ADDI.make(self.FRAME_PTR_REG, self.STACK_PTR_REG, 0))
+
+    def compile_init(self):
+        stack_bottom = 1250  # FIXME quick fix so stack does not run into program instructions
+        self.emit_immediate(stack_bottom, self.FRAME_PTR_REG)
 
     def compile_epilogue(self, func_block):
         if not func_block.func.is_main:
@@ -222,7 +230,7 @@ class DLXBackend(backend.Backend):
         # Simple F1 instructions
         arith_f1_instrs = {
             "add": INSTRUCTIONS.ADD,
-            "adda": INSTRUCTIONS.ADD,
+            "adda": INSTRUCTIONS.ADD,  # TODO actually implement LDX, for now its ADD followed by LDW
             "sub": INSTRUCTIONS.SUB,
             "mul": INSTRUCTIONS.MUL,
             "div": INSTRUCTIONS.DIV,
@@ -232,7 +240,7 @@ class DLXBackend(backend.Backend):
         # For most instructions, we first have to compile the operands.
         # We do not do it here for arithmetic F1 instructions, since we might want to use
         # immediate variants of these instructions instead if one of the operands are immediate.
-        if instr.instr != "phi" and instr.instr not in arith_f1_instrs:
+        if instr.instr not in {"phi", "alloca"} and instr.instr not in arith_f1_instrs:
             ops = [self.compile_operand(op, context=context, into=i+1) for i, op in enumerate(instr.ops)]
             # ops will contain register numbers / immediate values for all operands
 
@@ -278,14 +286,19 @@ class DLXBackend(backend.Backend):
             self.emit_term(dlx_instr)
 
         elif instr.instr == "store":
-            self.emit_heap_store(ops[0], ops[1])
+            self.emit_heap_store(ops[1], ops[0])
 
         elif instr.instr == "load":
             self.emit_heap_load(ops[0], self.RES_REG)
             self.allocator.store(instr.i, self.RES_REG)
 
         elif instr.instr == "alloca":
-            raise NotImplementedError()
+            assert isinstance(instr.ops[0], ssa.ImmediateOp)  # Dynamic memory allocation currently not supported
+            sz = instr.ops[0].val
+            self.heap_height += sz
+            self.emit(INSTRUCTIONS.ADDI.make(self.RES_REG, self.ZERO_REG, self.heap_height),
+                      block=context.label)
+            self.allocator.store(instr.i, self.RES_REG)
 
         elif instr.instr == "call":
             assert isinstance(instr.ops[0], ssa.FunctionOp)
@@ -339,13 +352,17 @@ class DLXBackend(backend.Backend):
         emit_fun(INSTRUCTIONS.STW.make(val_reg, self.FRAME_PTR_REG, -addr_offs*self.WORD_SIZE),
                  block=block)
 
-    def emit_heap_load(self, addr_offs, into, block=None, back=False):
+    def emit_heap_load(self, addr_offs_reg, into, block=None, back=False):
         emit_fun = self.emit if not back else self.emit_back
-        emit_fun(INSTRUCTIONS.LDW.make(into, self.GLOBAL_MEM_PTR_REG, addr_offs*self.WORD_SIZE),
+        emit_fun(INSTRUCTIONS.LDW.make(into, self.GLOBAL_MEM_PTR_REG, -addr_offs_reg),
                  block=block)
 
-    def emit_heap_store(self, addr_offs, val_reg):
-        self.emit(INSTRUCTIONS.STW.make(val_reg, self.GLOBAL_MEM_PTR_REG, addr_offs*self.WORD_SIZE))
+    def emit_heap_store(self, addr_offs_reg, val_reg):
+        self.emit(INSTRUCTIONS.STX.make(val_reg, self.GLOBAL_MEM_PTR_REG, -addr_offs_reg))
 
     def emit_move(self, from_reg, to_reg):
         self.emit(INSTRUCTIONS.ADDI.make(to_reg, from_reg, 0))
+
+    def emit_immediate(self, immediate, into, block=None):
+        self.emit(INSTRUCTIONS.ADDI.make(into, self.ZERO_REG, immediate),
+                  block=block)

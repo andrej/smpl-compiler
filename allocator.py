@@ -77,12 +77,14 @@ class StackRegisterAllocator(RegisterAllocator):
 
     def __init__(self, ir: ssa.CompilationContext, be: backend.Backend):
         super().__init__(ir, be)
-        self.stack_height = 0
-        self.offsets = {}
+        self.stack_offsets = {}
+        self.heap_offsets = {}
+        self.total_stack_height = 0
 
     def allocate(self):
         stack_height = 0
-        self.offsets = {}
+        heap_height = 0
+        self.stack_offsets = {}
         for block in self.ir:
             if block.func.enter_block == block:
                 # Every function has their own stack
@@ -90,15 +92,16 @@ class StackRegisterAllocator(RegisterAllocator):
             for instr in block.instrs:
                 if not instr.produces_output:
                     continue
-                self.offsets[instr.i] = stack_height
+                self.stack_offsets[instr.i] = stack_height
                 stack_height += 1
+                self.total_stack_height += 1
 
     def access(self, var_name, into=0, block=None, back=False):
-        if var_name not in self.offsets:
+        if var_name not in self.stack_offsets:
             raise Exception("Access to undeclared variable {}.".format(var_name))
-        self.backend.emit_stack_load(self.offsets[var_name], into,
+        self.backend.emit_stack_load(self.stack_offsets[var_name], into,
                                      block=block, back=back)
         return into
 
     def store(self, var_name, value_reg, block=None, back=False):
-        self.backend.emit_stack_store(self.offsets[var_name], value_reg, block=block, back=back)
+        self.backend.emit_stack_store(self.stack_offsets[var_name], value_reg, block=block, back=back)
