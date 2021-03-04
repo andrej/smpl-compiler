@@ -125,7 +125,7 @@ class PossiblyPhiOp(Op):
         self.op = original_op
 
     def __eq__(self, other):
-        return isinstance(other, PossiblyPhiOp) and self.op == other.op
+        return isinstance(other, PossiblyPhiOp) and id(self.op) == id(other.op)
 
 
 class Instruction:
