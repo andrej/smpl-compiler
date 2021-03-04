@@ -78,6 +78,7 @@ class StackRegisterAllocator(RegisterAllocator):
     def __init__(self, ir: ssa.CompilationContext, be: backend.Backend):
         super().__init__(ir, be)
         self.stack_offsets = {}
+        self.func_stack_heights = {}
         self.heap_offsets = {}
         self.total_stack_height = 0
 
@@ -88,12 +89,14 @@ class StackRegisterAllocator(RegisterAllocator):
             if block.func.enter_block == block:
                 # Every function has their own stack
                 stack_height = 0
+                self.func_stack_heights[block.func.name] = 0
             for instr in block.instrs:
                 if not instr.produces_output:
                     continue
                 self.stack_offsets[instr.i] = stack_height
                 stack_height += 1
                 self.total_stack_height += 1
+                self.func_stack_heights[block.func.name] += 1
 
     def access(self, var_name, into=0, block=None, back=False):
         if var_name not in self.stack_offsets:

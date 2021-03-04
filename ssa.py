@@ -497,20 +497,20 @@ class CompilationContext(dot.DotGraph):
 
 class CompilationContextIterator:
     """
-    Depth-first iteration gives the correct order of blocks for fall-through execution.
+    Breadth-first iteration gives the correct order of blocks for fall-through execution.
     """
 
     def __init__(self, context: CompilationContext):
         self.context = context
-        self.todo = list(reversed(self.context.root_blocks))
+        self.todo = self.context.root_blocks.copy()
         self.visited = set()
 
     def __next__(self):
         if not self.todo:
             raise StopIteration
-        block = self.todo.pop()
+        block = self.todo.pop(0)
         self.visited.add(block)
-        for succ in reversed(block.succs):
+        for succ in block.succs:
             if succ in self.visited:
                 continue
             self.visited.add(succ)

@@ -133,7 +133,7 @@ class INSTRUCTIONS:
     BGT = F1Instruction(45, "BGT")
 
     BSR = F1Instruction(46, "BSR")
-    JSR = F3Instruction(48, "BSR")
+    JSR = F3Instruction(48, "JSR")
     RET = F2Instruction(49, "RET")
 
     RDD = F2Instruction(50, "RDD")
@@ -189,6 +189,7 @@ class DLXBackend(backend.Backend):
 
         # Update frame pointer to point to bottom of calling functions stack
         # and store old frame pointer
+        self.emit(INSTRUCTIONS.PSH.make(self.RET_ADD_REG, self.STACK_PTR_REG, -self.WORD_SIZE))
         self.emit(INSTRUCTIONS.PSH.make(self.FRAME_PTR_REG, self.STACK_PTR_REG, -self.WORD_SIZE))
         self.emit_move(self.STACK_PTR_REG, self.FRAME_PTR_REG)
 
@@ -203,6 +204,7 @@ class DLXBackend(backend.Backend):
         # restore old frame and stack pointers
         self.emit_move(self.FRAME_PTR_REG, self.STACK_PTR_REG)
         self.emit(INSTRUCTIONS.POP.make(self.FRAME_PTR_REG, self.STACK_PTR_REG, +self.WORD_SIZE))
+        self.emit(INSTRUCTIONS.POP.make(self.RET_ADD_REG, self.STACK_PTR_REG, +self.WORD_SIZE))
         self.emit(INSTRUCTIONS.RET.make(0, 0, self.RET_ADD_REG))
 
     def compile_init(self):
@@ -251,6 +253,15 @@ class DLXBackend(backend.Backend):
                      block=block)
             return into
         return None  # Label arguments will be replaced in the linking phase
+
+    def compile_block(self, block):
+        super().compile_block(block)
+        # Make sure fall-through leads to correct block
+        # TODO remove for blocks if succ is directly fall-through
+        if block.succs:
+            dlx_instr = INSTRUCTIONS.BSR.make(0, 0, 0)
+            dlx_instr.jump_label = block.succs[0].label
+            self.emit_term(dlx_instr)
 
     def compile_instr(self, instr: ssa.Instruction, context: ssa.BasicBlock):
         # translate the neg(x) op into sub(0, x)
@@ -356,7 +367,7 @@ class DLXBackend(backend.Backend):
             # offsets above frame pointer) we need to update it here so the callee
             # knows where to start writing its values on the stack.
             n_callee_save = len(self.CALLEE_SAVE)
-            stack_height = self.allocator.stack_offsets[instr.i] + n_callee_save
+            stack_height = self.allocator.func_stack_heights[context.func.name] + n_callee_save
             self.emit(INSTRUCTIONS.ADDI.make(self.STACK_PTR_REG, self.FRAME_PTR_REG, -stack_height*self.WORD_SIZE))  # R29 = R28 - this func stack height
 
             # PUSH ARGUMENTS ONTO STACK
@@ -364,21 +375,11 @@ class DLXBackend(backend.Backend):
                 arg_reg = self.compile_operand(arg, context=context, into=self.RES_REG)
                 self.emit(INSTRUCTIONS.PSH.make(arg_reg, self.STACK_PTR_REG, -self.WORD_SIZE))
 
-            # CALLER SAVED REGISTERS
-            # return address is the very last thing we write to our stack frame
-            # it is caller-saved, since the jump instruction will overwrite it!
-            self.emit(INSTRUCTIONS.PSH.make(self.RET_ADD_REG, self.STACK_PTR_REG, -self.WORD_SIZE))
-
             # JUMP
             # actual function call: jump to label, storing return address in R31
             dlx_instr = INSTRUCTIONS.JSR.make(0)
             dlx_instr.jump_to_entry = instr.ops[0].func
             self.emit(dlx_instr)
-
-            # RESTORE CALLER SAVED REGISTERS
-            # after jump instruction: this is where we end up when the function returns
-            # hence, restore the return address from the top of our stack
-            self.emit(INSTRUCTIONS.POP.make(self.RET_ADD_REG, self.STACK_PTR_REG, +self.WORD_SIZE))
 
             # STORE RETURN VALUE
             # Values are passed back in register RES_REG
@@ -387,8 +388,9 @@ class DLXBackend(backend.Backend):
         elif instr.instr == "return":
             if instr.ops:  # return values are passed in register RES_REG
                 self.compile_operand(instr.ops[0], context=context, into=self.RES_REG)
-            dlx_instr = INSTRUCTIONS.JSR.make(0)
-            dlx_instr.jump_to_exit = context.func.name
+            self.compile_epilogue(context)
+            #dlx_instr = INSTRUCTIONS.JSR.make(0)
+            #dlx_instr.jump_to_exit = context.func.name
 
         elif instr.instr == "phi":
             pred_a, op_a, pred_b, op_b = instr.ops
@@ -422,11 +424,10 @@ class DLXBackend(backend.Backend):
                 raise Exception("Unknown symbol {}".format(instr.jump_label))
             # Jump instructions have their target as arg 3 (c)
             ops = list(instr.ops)
-            target = lookup_map[target_label]
-            if instr.opcode == INSTRUCTIONS.BSR.opcode:
-                target = target - i  # (relative offset)
             if instr.opcode == INSTRUCTIONS.JSR.opcode:
-                target *= self.WORD_SIZE
+                target = lookup_map[target_label] * self.WORD_SIZE  # (absolute offset)
+            else:
+                target = lookup_map[target_label] - i
             ops[-1] = target
             instr.ops = tuple(ops)
             self.instrs[i] = instr
