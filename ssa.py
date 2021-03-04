@@ -270,6 +270,7 @@ class BasicBlock(dot.DotNode):
                 # eliminated together or not at all, they must always appear in pairs.
                 identical_adda = self.instrs[-1].find_dominating_identical()
                 if identical_adda:
+                    orig_ops = instr.ops
                     instr.ops = (InstructionOp(identical_adda),)
                     identical = instr.find_dominating_identical()
                     if identical:
@@ -277,6 +278,8 @@ class BasicBlock(dot.DotNode):
                         # thus eliminate both.
                         del self.instrs[-1]
                         return InstructionOp(identical)
+                    else:
+                        instr.ops = orig_ops
         instr.i = instr_index
         self.instrs.append(instr)
         self.dom_instr_tree[dominance_class] = instr
@@ -481,7 +484,7 @@ class CompilationContext(dot.DotGraph):
         uninitialized_set = {op.name
                              for block in self
                              for instr in block.instrs
-                             if instr.instr != "phi"
+                             #if instr.instr != "phi"
                              for op in instr.ops
                              if isinstance(op, UninitializedVarOp)}
         for uninitialized in uninitialized_set:
@@ -499,7 +502,7 @@ class CompilationContextIterator:
 
     def __init__(self, context: CompilationContext):
         self.context = context
-        self.todo = self.context.root_blocks.copy()
+        self.todo = list(reversed(self.context.root_blocks))
         self.visited = set()
 
     def __next__(self):

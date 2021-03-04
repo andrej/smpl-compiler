@@ -209,6 +209,7 @@ class FunctionDeclaration(ASTNode):
         func = ssa.Function()
         func.name = self.ident.name
         func.enter_block = root
+        func.arg_names = [ident.name for ident in self.param_idents]
         root.func = func
         context.add_root_block(root)
         context.set_current_block(root)

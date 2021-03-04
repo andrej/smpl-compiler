@@ -1,0 +1,16 @@
+main
+array[10] arr;
+var v, i;
+{
+    let v <- 999;
+    let i <- 0;
+    while i < 10 do
+        let arr[i] <- v*i;
+        let i <- i + 1;
+    od;
+    let i <- 0;
+    while i < 10 do
+        call outputNum(arr[i]);
+        let i <- i + 1;
+    od;
+}.

@@ -79,10 +79,10 @@ def main():
         backend.link()
         if args.asm:
             output.write(backend.get_asm().encode("ascii"))
-        elif args.run:
+        if args.run:
             dlx_emulator.DLX.load([instr.encode() for instr in backend.instrs])
             dlx_emulator.DLX.execute()
-        else:
+        if not args.asm and not args.run:
             output.write(backend.get_machine_code())
 
 

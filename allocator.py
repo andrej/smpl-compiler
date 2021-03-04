@@ -83,7 +83,6 @@ class StackRegisterAllocator(RegisterAllocator):
 
     def allocate(self):
         stack_height = 0
-        heap_height = 0
         self.stack_offsets = {}
         for block in self.ir:
             if block.func.enter_block == block:

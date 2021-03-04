@@ -8,6 +8,7 @@ Author: André Rösti
 """
 
 import ssa
+import math
 
 
 class Backend:
@@ -18,6 +19,8 @@ class Backend:
         self.block_instrs = {}  # Map block label to tuples (head_instrs, tail_instrs)
         self.instrs = []  # After linking: linear list of blocks
         self.block_offsets = {}  # Map block label to offset
+        self.func_entry_offsets = {}  # Map function name to its prologue
+        self.func_exit_offsets = {}  # Map function name to its epilogue
         self.current_block = None
 
     def get_asm(self):
@@ -30,19 +33,22 @@ class Backend:
 
         out = ""
         label_length = max(len(label) for label in self.block_offsets)
+        num_length = math.floor(math.log10(len(self.instrs))) + 1
         for offset, instr in enumerate(self.instrs):
+            out += "{0:{1}d}  ".format(offset, num_length)
             if offset in inverse_block_offsets:
                 for label in inverse_block_offsets[offset]:
                     out += "{0:{1}s} ".format(label+":", label_length+1)
                 out += str(instr)+"\n"
             else:
-                out += "{}  {}\n".format(" "*label_length, str(instr))
+                out += "{}  {}\n".format(" "*(label_length), str(instr))
         return out
 
     def get_machine_code(self):
         return b"".join(map(bytes, self.instrs))
 
     def compile(self):
+        # New "program loader" block for init code
         self.block_instrs = {}
         for block in self.ir:
             self.block_instrs[block.label] = ([], [], [])
@@ -52,18 +58,30 @@ class Backend:
             self.compile_block(block)
 
     def compile_init(self):
+        """
+        "Loader" code compiled into the program. This only gets executed once at
+        the start of the program before the main function.
+        """
         pass
 
-    def compile_prelude(self, func_block):
+    def compile_prologue(self, func_block):
+        """
+        Function prologue. Save callee-save registers here.
+        """
         pass
 
     def compile_epilogue(self, func_block):
+        """
+        Function epilogue. All function exits should jump to the stream of code
+        compiled here (its address offset is stored in self.func_exit_offsets).
+        Restore callee-save registers.
+        """
         pass
 
     def compile_block(self, block):
         self.current_block = block.label
         if block.func.enter_block == block:
-            self.compile_prelude(block)
+            self.compile_prologue(block)
         for instr in block.instrs:
             self.compile_instr(instr, context=block)
         if block.func.exit_block == block:
@@ -79,11 +97,17 @@ class Backend:
         :return:
         """
         self.instrs = []
-        for block, (head_instrs, tail_instrs, term_instr) in self.block_instrs.items():
-            self.block_offsets[block] = len(self.instrs)
+        blocks = {block.label: block for block in self.ir}  # map block label to block object
+        for label, (head_instrs, tail_instrs, term_instr) in self.block_instrs.items():
+            if blocks[label] == blocks[label].func.enter_block:  # add label for function entry
+                self.func_entry_offsets[blocks[label].func.name] = len(self.instrs)
+            if blocks[label] == blocks[label].func.exit_block:
+                self.func_exit_offsets[blocks[label].func.name] = len(self.instrs)
+            self.block_offsets[label] = len(self.instrs)
             self.instrs.extend(head_instrs)
             self.instrs.extend(tail_instrs)
             self.instrs.extend(term_instr)
+        # After this, subclasses can use self.block_offsets to link the correct jump addresses
 
     def emit(self, instr, block=None):
         block = block or self.current_block

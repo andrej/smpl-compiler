@@ -1,0 +1,44 @@
+main
+array[4] arr;
+var max;
+
+function minOrMax(returnMin, a1, a2, a3, a4);
+array[4] arr;
+var i, j, min, max;
+{
+    let arr[0] <- a1;
+    let arr[1] <- a2;
+    let arr[2] <- a3;
+    let arr[3] <- a4;
+    let i <- 1;
+    let j <- 0;
+    let max <- arr[0];
+    let min <- arr[0];
+    while i < 4 do
+        if arr[i] > max then
+            let j <- i;
+            let max <- arr[i];
+        else
+            if arr[i] < min then
+                let j <- i;
+                let min <- arr[i];
+            fi;
+        fi;
+        let i <- i + 1;
+    od;
+    if returnMin == 1 then
+        return min;
+    else
+        return max;
+    fi;
+};
+
+{
+	let arr[0] <- call inputNum();
+	let arr[1] <- call inputNum();
+	let arr[2] <- call inputNum();
+	let arr[3] <- call inputNum();
+	let max <- call minOrMax(0, arr[0], arr[1], arr[2], arr[3]);
+	call outputNum(max);
+	return max
+}.

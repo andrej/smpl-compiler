@@ -19,7 +19,9 @@ class Instruction:
         self.opcode = opcode
         self.mnemonic = mnemonic
         self.ops = ops
-        self.jump_label = None  # only used for BSR, JSR, RET
+        self.jump_label = None  # during linking, only used for BSR, JSR, RET
+        self.jump_to_entry = None  # replace arg during linking to jump to func prologue
+        self.jump_to_exit = None  # replace operand during linking to jump to func epilogue
 
     def __repr__(self):
         return self.get_assembly()
@@ -117,7 +119,7 @@ class INSTRUCTIONS:
     CHKI = F1Instruction(30, "CHKI")
 
     LDW = F1Instruction(32, "LDW")
-    LDX = F2Instruction(32, "LDX")
+    LDX = F2Instruction(33, "LDX")
     POP = F1Instruction(34, "POP")
     STW = F1Instruction(36, "STW")
     STX = F2Instruction(37, "STX")
@@ -158,38 +160,72 @@ class DLXBackend(backend.Backend):
     WORD_SIZE = 4
     STACK_SIZE = 0xFFF
 
-    ARG_REGS = [1, 2, 3, 4]
-    CALLEE_SAVE = [5, 6, 7, 8, 9, 10]
+    CALLEE_SAVE = [1, 2]
 
     def __init__(self, ir):
         super().__init__(ir)
         self.heap_height = 0
 
-    def compile_prelude(self, func_block):
+    def compile_prologue(self, func_block):
         if func_block.func.is_main:
             return  # no prelude required for main func
-        # As function is being called, stack pointer is at the bottom of calling function,
-        # pointing at the return address.
-        n_args = len(func_block.func.arg_names)
-        self.emit(INSTRUCTIONS.ADDI.make(self.STACK_PTR_REG, self.STACK_PTR_REG,
-                                         self.WORD_SIZE*n_args))
-        # Save registers
-        for reg in self.CALLEE_SAVE:
-            self.emit(INSTRUCTIONS.PSH.make(reg, self.STACK_PTR_REG, self.WORD_SIZE))
-        self.emit(INSTRUCTIONS.ADDI.make(self.FRAME_PTR_REG, self.STACK_PTR_REG, 0))
+        #  --- high addr ---
+        #          *  LOCAL 1
+        #          *  LOCAL 2
+        #          *  ...
+        # caller   *  PARAM 1
+        #          *  PARAM 2
+        #          *  ...
+        #          *  OLD RET ADDR
+        #          / caller's old frame ptr <--- frame ptr
+        #          / CALLEE SAVED REG 1
+        #          / CALLEE SAVED REG 2
+        #          / ...
+        #          / LOCAL 1
+        # callee   / LOCAL 2
+        #          / ...
+        #          / LOCAL N           <--- stack ptr
+        #  --- low  addr ---
 
-    def compile_init(self):
-        stack_bottom = 1250  # FIXME quick fix so stack does not run into program instructions
-        self.emit_immediate(stack_bottom, self.FRAME_PTR_REG)
+        # Update frame pointer to point to bottom of calling functions stack
+        # and store old frame pointer
+        self.emit(INSTRUCTIONS.PSH.make(self.FRAME_PTR_REG, self.STACK_PTR_REG, -self.WORD_SIZE))
+        self.emit_move(self.STACK_PTR_REG, self.FRAME_PTR_REG)
+
+        # Save registers
+        for i, reg in enumerate(self.CALLEE_SAVE):
+            self.emit(INSTRUCTIONS.STW.make(reg, self.FRAME_PTR_REG, -(i+1)*self.WORD_SIZE))
 
     def compile_epilogue(self, func_block):
-        if not func_block.func.is_main:
-            self.emit(INSTRUCTIONS.RET.make(0, 0, self.RET_ADD_REG))
         # Restore registers
-        for reg in self.CALLEE_SAVE:
-            self.emit(INSTRUCTIONS.POP.make(reg, self.STACK_PTR_REG, self.WORD_SIZE))
-        self.emit(INSTRUCTIONS.LDW.make(self.RET_ADD_REG, self.STACK_PTR_REG, 0))
+        for i, reg in enumerate(self.CALLEE_SAVE):
+            self.emit(INSTRUCTIONS.LDW.make(reg, self.FRAME_PTR_REG, -(i+1)*self.WORD_SIZE))
+        # restore old frame and stack pointers
+        self.emit_move(self.FRAME_PTR_REG, self.STACK_PTR_REG)
+        self.emit(INSTRUCTIONS.POP.make(self.FRAME_PTR_REG, self.STACK_PTR_REG, +self.WORD_SIZE))
         self.emit(INSTRUCTIONS.RET.make(0, 0, self.RET_ADD_REG))
+
+    def compile_init(self):
+        # We iterate over all memory allocation calls to determine the heap height;
+        # we then allocate the stack to start right below that, to make maximum use
+        # of memory
+        heap_size = 0
+        for block in self.ir:
+            for instr in block.instrs:
+                if instr.instr != "alloca":
+                    continue
+                assert isinstance(instr.ops[0], ssa.ImmediateOp)  # Dynamic memory allocation currently not supported
+                sz = instr.ops[0].val
+                heap_size += sz
+        # subtract heap size from global memory pointer address
+        self.emit(INSTRUCTIONS.ADDI.make(self.FRAME_PTR_REG, self.GLOBAL_MEM_PTR_REG, -heap_size*4))
+        self.emit_move(self.FRAME_PTR_REG, self.STACK_PTR_REG)
+
+        # jump to main function
+        #dlx_instr = INSTRUCTIONS.JSR.make(0)
+        #dlx_instr.jump_to_entry = "main"
+        #self.emit(dlx_instr)
+        #self.emit(INSTRUCTIONS.RET.make(0, 0, 0))
 
     def compile_operand(self, op: ssa.Op, context: ssa.BasicBlock, into=1, block=None, back=False):
         emit_fun = self.emit if not back else self.emit_back
@@ -205,18 +241,13 @@ class DLXBackend(backend.Backend):
             return op_reg
         elif isinstance(op, ssa.ArgumentOp):
             # ABI: We pass arguments on the stack.
-            # In the prologue, we adjust the stack pointer to point to local variables.
-            # Everything below the stack pointer for #args are the args, in reverse order.
+            # They are in reverse order just below the return address. The return
+            # address is the last thing stored by the calling function on its stack,
+            # and the frame pointer points to the last item of the caller stack.
+            # Hence, arguments start at FRAME_PTR+1.
             idx = context.func.arg_names.index(op.name)
-            if idx < len(self.ARG_REGS):
-                if into != idx:
-                    emit_fun(INSTRUCTIONS.ADDI.make(into, idx, 0), block=block)
-                return into  # argument passed in a register
-            # argument passed on stack
-            old_sp_offs = +len(self.CALLEE_SAVE)  # frame pointer + calle saved
-            offs = (len(context.func.arg_names)
-                    - idx)  # arguments are pushed on stack in reverse order
-            emit_fun(INSTRUCTIONS.LDW.make(into, self.FRAME_PTR_REG, old_sp_offs + offs*self.WORD_SIZE),
+            offset = 1 + (len(context.func.arg_names) - idx)
+            emit_fun(INSTRUCTIONS.LDW.make(into, self.FRAME_PTR_REG, offset*self.WORD_SIZE),
                      block=block)
             return into
         return None  # Label arguments will be replaced in the linking phase
@@ -240,7 +271,12 @@ class DLXBackend(backend.Backend):
         # For most instructions, we first have to compile the operands.
         # We do not do it here for arithmetic F1 instructions, since we might want to use
         # immediate variants of these instructions instead if one of the operands are immediate.
-        if instr.instr not in {"phi", "alloca"} and instr.instr not in arith_f1_instrs:
+        # We also do not do it for phi nodes, since those are a simple move of a previous instr,
+        # or alloca, where we handle it ourselves.
+        # We do not do it for call instructions, because there we can have an unbounded number
+        # of arguments, that we do not want to all put into registers. Instead, we push them
+        # on the stack in this instruction-specific code.
+        if instr.instr not in {"phi", "alloca", "call", "return"} and instr.instr not in arith_f1_instrs:
             ops = [self.compile_operand(op, context=context, into=i+1) for i, op in enumerate(instr.ops)]
             # ops will contain register numbers / immediate values for all operands
 
@@ -295,24 +331,64 @@ class DLXBackend(backend.Backend):
         elif instr.instr == "alloca":
             assert isinstance(instr.ops[0], ssa.ImmediateOp)  # Dynamic memory allocation currently not supported
             sz = instr.ops[0].val
-            self.heap_height += sz
+            self.heap_height -= sz
             self.emit(INSTRUCTIONS.ADDI.make(self.RES_REG, self.ZERO_REG, self.heap_height),
                       block=context.label)
             self.allocator.store(instr.i, self.RES_REG)
 
         elif instr.instr == "call":
             assert isinstance(instr.ops[0], ssa.FunctionOp)
-            if instr.ops[0].func == "inputNum":
+            # built-in functions
+            if instr.ops[0].func == "InputNum":
                 self.emit(INSTRUCTIONS.RDD.make(self.RES_REG, 0, 0))
                 self.allocator.store(instr.i, self.RES_REG)
                 return
-            elif instr.ops[0].func == "outputNum":
-                self.emit(INSTRUCTIONS.WRD.make(0, ops[1], 0))
+            elif instr.ops[0].func == "OutputNum":
+                self.compile_operand(instr.ops[1], context=context, into=self.RES_REG)
+                self.emit(INSTRUCTIONS.WRD.make(0, self.RES_REG, 0))
                 return
-            raise NotImplementedError()
+            elif instr.ops[0].func == "OutputNewLine":
+                self.emit(INSTRUCTIONS.WRL.make(0, 0, 0))
+                return
+
+            # UPDATE STACK POINTER
+            # since we do not actually use our stack pointer (instead use absolute
+            # offsets above frame pointer) we need to update it here so the callee
+            # knows where to start writing its values on the stack.
+            n_callee_save = len(self.CALLEE_SAVE)
+            stack_height = self.allocator.stack_offsets[instr.i] + n_callee_save
+            self.emit(INSTRUCTIONS.ADDI.make(self.STACK_PTR_REG, self.FRAME_PTR_REG, -stack_height*self.WORD_SIZE))  # R29 = R28 - this func stack height
+
+            # PUSH ARGUMENTS ONTO STACK
+            for arg in instr.ops[1:]:
+                arg_reg = self.compile_operand(arg, context=context, into=self.RES_REG)
+                self.emit(INSTRUCTIONS.PSH.make(arg_reg, self.STACK_PTR_REG, -self.WORD_SIZE))
+
+            # CALLER SAVED REGISTERS
+            # return address is the very last thing we write to our stack frame
+            # it is caller-saved, since the jump instruction will overwrite it!
+            self.emit(INSTRUCTIONS.PSH.make(self.RET_ADD_REG, self.STACK_PTR_REG, -self.WORD_SIZE))
+
+            # JUMP
+            # actual function call: jump to label, storing return address in R31
+            dlx_instr = INSTRUCTIONS.JSR.make(0)
+            dlx_instr.jump_to_entry = instr.ops[0].func
+            self.emit(dlx_instr)
+
+            # RESTORE CALLER SAVED REGISTERS
+            # after jump instruction: this is where we end up when the function returns
+            # hence, restore the return address from the top of our stack
+            self.emit(INSTRUCTIONS.POP.make(self.RET_ADD_REG, self.STACK_PTR_REG, +self.WORD_SIZE))
+
+            # STORE RETURN VALUE
+            # Values are passed back in register RES_REG
+            self.allocator.store(instr.i, self.RES_REG)
 
         elif instr.instr == "return":
-            raise NotImplementedError()
+            if instr.ops:  # return values are passed in register RES_REG
+                self.compile_operand(instr.ops[0], context=context, into=self.RES_REG)
+            dlx_instr = INSTRUCTIONS.JSR.make(0)
+            dlx_instr.jump_to_exit = context.func.name
 
         elif instr.instr == "phi":
             pred_a, op_a, pred_b, op_b = instr.ops
@@ -331,34 +407,58 @@ class DLXBackend(backend.Backend):
     def link(self):
         super().link()
         for i, instr in enumerate(self.instrs):
-            if not instr.jump_label:
+            if not instr.jump_label and not instr.jump_to_entry and not instr.jump_to_exit:
                 continue
-            if instr.jump_label not in self.block_offsets:
+            target = None
+            target_label = instr.jump_label
+            lookup_map = self.block_offsets
+            if instr.jump_to_entry:
+                target_label = instr.jump_to_entry
+                lookup_map = self.func_entry_offsets
+            elif instr.jump_to_exit:
+                target_label = instr.jump_to_exit
+                lookup_map = self.func_exit_offsets
+            if target_label not in lookup_map:
                 raise Exception("Unknown symbol {}".format(instr.jump_label))
             # Jump instructions have their target as arg 3 (c)
             ops = list(instr.ops)
-            ops[-1] = self.block_offsets[instr.jump_label] - i  # (relative offset)
+            target = lookup_map[target_label]
+            if instr.opcode == INSTRUCTIONS.BSR.opcode:
+                target = target - i  # (relative offset)
+            if instr.opcode == INSTRUCTIONS.JSR.opcode:
+                target *= self.WORD_SIZE
+            ops[-1] = target
             instr.ops = tuple(ops)
             self.instrs[i] = instr
 
     def emit_stack_load(self, offset, into, block=None, back=False):
+        """
+        We actually use the frame pointer as the base address for our stack
+        loads and writes. This allows us to use "absolute" offsets within
+        the function, whereas the stack pointer may move to stay on top of
+        the stack.
+        """
         emit_fun = self.emit if not back else self.emit_back
+        n_callee_save = len(self.CALLEE_SAVE)
+        offset += n_callee_save + 1  # adjust for the portion of the stack used for calle save registers in prologue
         # Memory is byte addressed and one word is four bytes
         emit_fun(INSTRUCTIONS.LDW.make(into, self.FRAME_PTR_REG, -offset*self.WORD_SIZE),
                  block=block)
 
     def emit_stack_store(self, addr_offs, val_reg, block=None, back=False):
         emit_fun = self.emit if not back else self.emit_back
+        n_callee_save = len(self.CALLEE_SAVE)
+        addr_offs += n_callee_save + 1
         emit_fun(INSTRUCTIONS.STW.make(val_reg, self.FRAME_PTR_REG, -addr_offs*self.WORD_SIZE),
                  block=block)
 
     def emit_heap_load(self, addr_offs_reg, into, block=None, back=False):
         emit_fun = self.emit if not back else self.emit_back
-        emit_fun(INSTRUCTIONS.LDW.make(into, self.GLOBAL_MEM_PTR_REG, -addr_offs_reg),
+        emit_fun(INSTRUCTIONS.LDX.make(into, self.GLOBAL_MEM_PTR_REG, addr_offs_reg),
                  block=block)
 
     def emit_heap_store(self, addr_offs_reg, val_reg):
-        self.emit(INSTRUCTIONS.STX.make(val_reg, self.GLOBAL_MEM_PTR_REG, -addr_offs_reg))
+        self.emit(INSTRUCTIONS.STX.make(val_reg, self.GLOBAL_MEM_PTR_REG, addr_offs_reg))
 
     def emit_move(self, from_reg, to_reg):
         self.emit(INSTRUCTIONS.ADDI.make(to_reg, from_reg, 0))
