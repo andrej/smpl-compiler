@@ -1,13 +1,24 @@
+[![](report/hero.png?raw=true)](report/presentation.pdf)
+
 # Another Smpl Compiler
 
 Provides a (somewhat) optimizing compiler for the Smpl programming language
-for the UC Irvine CS 241 Advanced Compiler Design class.
+as used in the CS 241 Advanced Compiler Design class by Dr. Michael Franz at
+the University of California, Irvine. See the `test_progs` directory for
+example programs of the Smpl programming language.
+
+The compiler includes a backend for the DLX instruction set architecture, and
+an emulator for this ISA.
 
 For help running the compiler, see
 
     ./main.py --help
 
 ## Structure
+
+![](report/structure1.png?raw=true)
+
+![](report/structure2.png?raw=true)
 
 The path from input file to compiled machine code goes as follows:
 
